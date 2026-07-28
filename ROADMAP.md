@@ -63,8 +63,8 @@ from code inspection alone.
 - `[x]` Mining, block placement, an eight-slot block hotbar, and torches.
 - `[x]` Regional Postcard/Zstandard SCW packages and atomic manifest writes.
 - `[x]` Unit, integration, lifecycle, and rendered-smoke test foundations.
-- `[!]` Foreground, UI, rendering, and persistence responsibilities are
-  concentrated in oversized modules.
+- `[!]` Foreground, UI, rendering, and persistence modules still combine
+  responsibilities with distinct dependencies and reasons to change.
 - `[!]` The loader still accepts a schema-compatible single-file SCW1 layout.
 - `[!]` Rear depth slices are generated scenery, not an editable backwall.
 - `[!]` There is no bounded block-simulation engine.
@@ -75,8 +75,8 @@ from code inspection alone.
 
 - `[ ]` Separate plain-Rust domain code, application orchestration, Bevy and
   platform adapters, and the composition root.
-- `[ ]` Split existing oversized files by responsibility, targeting 400
-  nonblank production lines and requiring justification above 600.
+- `[ ]` Split existing modules where concerns have distinct invariants,
+  dependencies, lifecycles, or reasons to change; keep cohesive code together.
 - `[ ]` Separate authoritative world storage, stream state, render state,
   persistence coordination, and UI session state.
 - `[ ]` Delete the single-file SCW loader, its data paths, compatibility
@@ -101,7 +101,8 @@ from code inspection alone.
 - `[ ]` Add one PowerShell command that runs formatting checks, Clippy, all
   tests, and a release build.
 - `[ ]` Ensure every resulting domain/application module has focused tests.
-- `[ ]` Document any unavoidable module-size exception in `ARCHITECTURE.md`.
+- `[ ]` Review every resulting module for one cohesive responsibility and a
+  narrow public surface.
 - `[ ]` Run the complete baseline locally and resolve or record every failure.
 
 M1 is complete when no authoritative block write bypasses `WorldMutator`, the

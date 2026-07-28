@@ -267,8 +267,9 @@ behavior.
 ## Module and interface rules
 
 - A module has one primary responsibility and a narrow public surface.
-- Production files target 400 nonblank lines. Crossing 600 lines requires a
-  responsibility-based split or a written exception in this document.
+- Split code when concerns have distinct invariants, dependencies, lifecycles,
+  or reasons to change.
+- Keep cohesive code together; file length alone is not a reason to split it.
 - Tests larger than the unit under test move to a dedicated test module.
 - Prefer concrete types inside a boundary. Use a trait for storage,
   simulation-region selection, or another implementation that tests replace.

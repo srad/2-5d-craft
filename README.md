@@ -135,7 +135,7 @@ coordinates are rebased or their live scenes unload.
 
 Several modules currently combine too many responsibilities. The target
 dependency direction, mutation boundary, simulation contract, threading rules,
-SCW schema policy, and file-size limits are defined in
+SCW schema policy, and module-boundary rules are defined in
 [`ARCHITECTURE.md`](ARCHITECTURE.md). Their staged implementation is tracked in
 [`ROADMAP.md`](ROADMAP.md).
 
