@@ -1,0 +1,83 @@
+# Rust / Cargo
+/target/
+**/*.rs.bk
+*.pdb
+mutants.out*
+rustc-ice-*.txt
+
+# Generated game data
+/worlds/
+/screenshots/
+/sidecraft-screenshot*.png
+/sidecraft-e2e.png
+
+# Local agent and index state
+/.agents/
+/.codegraph/
+/.codex/
+
+# Logs and crash dumps
+*.log
+logs/
+*.stackdump
+*.dmp
+
+# Test coverage and profiling
+/coverage/
+tarpaulin-report.html
+cobertura.xml
+lcov.info
+*.profraw
+*.profdata
+perf.data*
+
+# Environment and local configuration
+.env
+.env.*
+!.env.example
+*.local
+
+# Editors and IDEs
+/.idea/
+/.vscode/
+/.vs/
+*.iml
+*.iws
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.code-workspace
+*.vsix
+
+# Temporary and backup files
+*.swp
+*.swo
+*~
+*.bak
+*.tmp
+*.temp
+/.cache/
+/.tmp/
+/tmp/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
