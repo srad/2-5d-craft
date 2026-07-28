@@ -104,38 +104,34 @@ offset, alongside hotbar selection, timestamps, and day phase. Autosave
 compression and I/O run on Bevy's I/O task pool.
 
 Schema 2 is intentionally a fresh format. Legacy JSON metadata saves are
-neither loaded nor migrated. The current loader still accepts a
-schema-compatible single-file SCW1 layout; this is known prototype debt, not a
-compatibility promise. Roadmap item M1.1 deletes it, and M2 replaces the
+neither loaded nor migrated. Top-level single-file SCW1 worlds are also
+rejected: schema 2 worlds are package directories only. M2 replaces the
 current save model with exact-schema SCW version 3.
 
 ## Architecture
 
-The current library is organized into Bevy plugins and data modules:
+The library points dependencies inward from adapters to application services
+and then to a Bevy-free domain:
 
 ```text
 src/
-  block.rs        Block catalog and gameplay properties
-  world.rs        BlockGrid, generation, floating origin, chunk scenes
-  persistence.rs  SCW1 regions, validation, compression, atomic manifests
-  lighting.rs     Sky and torch flood lighting, day cycle
-  rendering.rs    Procedural atlas, PBR materials, depth-slice voxel meshes
-  player.rs       Avian controller, hotbar, animation
-  interaction.rs  Cursor targeting, mining, placement
-  camera.rs       Oblique orthographic camera and environment presentation
-  ui.rs           State-driven menus, HUD, autosave, exit handling
-  lib.rs          AppState and plugin composition
-  main.rs         Desktop window and Bevy startup
+  domain/          Blocks, dense chunks, generation, targeting, lighting
+  application/     World/session state, streaming plans, snapshots, save policy
+  adapters/
+    bevy/           ECS, Avian, rendering, input, UI, session and save systems
+    storage/        SCW packages, validation, compression, atomic manifests
+  lib.rs            AppState, concrete adapter selection and system ordering
+  main.rs           Desktop window and Bevy startup
 ```
 
-`BlockGrid` contains only resident dense chunks and is authoritative for active
-gameplay. Chunk meshes, merged colliders, and light data are derived from it.
-Modified chunks retain global `i64` identities when their local simulation
-coordinates are rebased or their live scenes unload.
+`WorldState` owns authoritative resident chunks, global persisted chunk
+identity, and revision tracking. Bevy's `WorldPresentation` owns only scene and
+derived-state dirtiness. `WorldRepository` isolates logical world identity from
+filesystem paths, while `SaveCoordinator` serializes and escalates save intent.
+Menus emit session commands; they do not load or save worlds directly.
 
-Several modules currently combine too many responsibilities. The target
-dependency direction, mutation boundary, simulation contract, threading rules,
-SCW schema policy, and module-boundary rules are defined in
+The dependency direction, mutation boundary, simulation contract, threading
+rules, SCW schema policy, and module-boundary rules are defined in
 [`ARCHITECTURE.md`](ARCHITECTURE.md). Their staged implementation is tracked in
 [`ROADMAP.md`](ROADMAP.md).
 

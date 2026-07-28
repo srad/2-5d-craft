@@ -21,11 +21,13 @@ caves, water, plants, and technology progression of
 ## Resume here
 
 - Active item: none
-- Next item: M1.1 — establish module boundaries and remove obsolete loading
+- Next item: M1.2 — establish the sole mutation boundary and derived-state
+  dispatch
 - Blocker: none
-- Last completed milestone: M0 — playable foundation
+- Last completed milestone: M1.1 — boundaries and legacy deletion
 - Verification baseline: confirmed 2026-07-28; formatting, Clippy with warnings
-  denied, all automated tests, and the release build passed locally
+  denied, 46 automated tests, the release build, and a real-GPU rendered smoke
+  passed locally
 
 At the start of a work session, mark exactly one item `[~]`. At the end, change
 it to `[x]`, `[!]`, or `[ ]`, record the next concrete item here, and record any
@@ -63,25 +65,26 @@ from code inspection alone.
 - `[x]` Mining, block placement, an eight-slot block hotbar, and torches.
 - `[x]` Regional Postcard/Zstandard SCW packages and atomic manifest writes.
 - `[x]` Unit, integration, lifecycle, and rendered-smoke test foundations.
-- `[!]` Foreground, UI, rendering, and persistence modules still combine
-  responsibilities with distinct dependencies and reasons to change.
-- `[!]` The loader still accepts a schema-compatible single-file SCW1 layout.
+- `[x]` Domain, application, Bevy, UI, and persistence responsibilities were
+  separated in M1.1.
+- `[x]` The schema-compatible single-file SCW1 world reader was deleted in
+  M1.1.
 - `[!]` Rear depth slices are generated scenery, not an editable backwall.
 - `[!]` There is no bounded block-simulation engine.
 
-## M1 — Architecture foundation `[ ]`
+## M1 — Architecture foundation `[~]`
 
-### M1.1 Boundaries and legacy deletion
+### M1.1 Boundaries and legacy deletion `[x]`
 
-- `[ ]` Separate plain-Rust domain code, application orchestration, Bevy and
+- `[x]` Separate plain-Rust domain code, application orchestration, Bevy and
   platform adapters, and the composition root.
-- `[ ]` Split existing modules where concerns have distinct invariants,
+- `[x]` Split existing modules where concerns have distinct invariants,
   dependencies, lifecycles, or reasons to change; keep cohesive code together.
-- `[ ]` Separate authoritative world storage, stream state, render state,
+- `[x]` Separate authoritative world storage, stream state, render state,
   persistence coordination, and UI session state.
-- `[ ]` Delete the single-file SCW loader, its data paths, compatibility
+- `[x]` Delete the single-file SCW loader, its data paths, compatibility
   branches, and compatibility tests.
-- `[ ]` Delete other unused APIs and old representations found during the
+- `[x]` Delete other unused APIs and old representations found during the
   boundary refactor; do not add wrappers or aliases.
 
 ### M1.2 Mutation and derived state

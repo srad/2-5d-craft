@@ -1,6 +1,5 @@
-use crate::AppState;
-use crate::world::BlockGrid;
-use bevy::prelude::*;
+use crate::domain::BlockGrid;
+use glam::IVec2;
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -9,7 +8,7 @@ pub struct LightCell {
     pub torch: u8,
 }
 
-#[derive(Resource, Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LightGrid {
     min_x: i32,
     width: i32,
@@ -17,7 +16,7 @@ pub struct LightGrid {
     cells: Vec<LightCell>,
 }
 
-#[derive(Resource, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct DayCycle {
     pub phase: f32,
     pub previous_light_level: u8,
@@ -155,26 +154,10 @@ impl DayCycle {
     }
 }
 
-pub struct LightingPlugin;
-
-impl Plugin for LightingPlugin {
-    fn build(&self, app: &mut App) {
-        app.init_resource::<DayCycle>().add_systems(
-            Update,
-            advance_day_cycle.run_if(in_state(AppState::Playing)),
-        );
-    }
-}
-
-fn advance_day_cycle(time: Res<Time>, mut day: ResMut<DayCycle>) {
-    day.phase = (day.phase + time.delta_secs() / 180.0).rem_euclid(1.0);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::world::BlockChunk;
-    use crate::{BlockKind, CHUNK_WIDTH, WORLD_HEIGHT};
+    use crate::domain::{BlockChunk, BlockKind, CHUNK_WIDTH, WORLD_HEIGHT};
 
     fn empty_grid() -> BlockGrid {
         let mut grid = BlockGrid::new(WORLD_HEIGHT);
@@ -185,56 +168,23 @@ mod tests {
     }
 
     #[test]
-    fn open_columns_receive_full_sky_light() {
-        let grid = empty_grid();
-        assert_eq!(LightGrid::calculate(&grid).get(IVec2::new(2, 0)).sky, 15);
-    }
-
-    #[test]
-    fn opaque_roof_creates_darkness_with_lateral_falloff() {
-        let mut grid = empty_grid();
-        for x in 1..CHUNK_WIDTH {
-            grid.set(IVec2::new(x, 4), BlockKind::Stone);
-        }
-        let light = LightGrid::calculate(&grid);
-        assert!(light.get(IVec2::new(CHUNK_WIDTH - 1, 3)).sky < light.get(IVec2::new(0, 3)).sky);
-    }
-
-    #[test]
     fn torch_light_falls_off_by_distance() {
         let mut grid = empty_grid();
-        grid.set(IVec2::new(2, 2), BlockKind::Torch);
+        grid.set(IVec2::new(4, 4), BlockKind::Torch);
         let light = LightGrid::calculate(&grid);
-        assert_eq!(light.get(IVec2::new(2, 2)).torch, 12);
-        assert_eq!(light.get(IVec2::new(3, 2)).torch, 11);
-        assert_eq!(light.get(IVec2::new(4, 2)).torch, 10);
-    }
-
-    #[test]
-    fn stone_blocks_torch_propagation() {
-        let mut grid = empty_grid();
-        grid.set(IVec2::new(1, 2), BlockKind::Torch);
-        grid.set(IVec2::new(2, 2), BlockKind::Stone);
-        assert_eq!(LightGrid::calculate(&grid).get(IVec2::new(2, 2)).torch, 0);
-    }
-
-    #[test]
-    fn opaque_faces_use_neighbor_light_for_rendering() {
-        let mut grid = empty_grid();
-        grid.set(IVec2::new(1, 1), BlockKind::Stone);
-        let light = LightGrid::calculate(&grid);
-        assert_eq!(light.get(IVec2::new(1, 1)).sky, 0);
-        assert_eq!(light.visible_at(&grid, IVec2::new(1, 1)).sky, 15);
+        assert_eq!(light.get(IVec2::new(4, 4)).torch, 12);
+        assert_eq!(light.get(IVec2::new(5, 4)).torch, 11);
     }
 
     #[test]
     fn day_cycle_has_bounded_light() {
-        for step in 0..100 {
-            let day = DayCycle {
-                phase: step as f32 / 100.0,
-                ..default()
+        for phase in [0.0, 0.25, 0.5, 0.75, 0.999] {
+            let cycle = DayCycle {
+                phase,
+                ..Default::default()
             };
-            assert!((2..=15).contains(&day.light_level()));
+            assert!((0.15..=1.0).contains(&cycle.daylight()));
+            assert!(cycle.light_level() <= 15);
         }
     }
 }

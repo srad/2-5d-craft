@@ -38,6 +38,25 @@ composition root
     +-- storage adapter implementing application ports
 ```
 
+The implemented M1.1 layout follows that direction:
+
+```text
+domain/
+    block, world, generation, targeting, lighting
+application/
+    snapshot, repository port, session, streaming, world state, saving
+adapters/
+    bevy/       ECS and presentation integrations
+    storage/    schema-2 SCW package repository
+lib.rs          composition root and schedule ordering
+```
+
+Domain snapshots are schema-neutral and world IDs are path-free. The storage
+adapter maps those values to the current schema-2 package layout. The Bevy
+adapter uses thin resource wrappers because Bevy resources must implement its
+ECS component contract; the wrapped domain and application types remain
+framework-independent.
+
 ### Domain
 
 The domain is plain Rust. It owns:

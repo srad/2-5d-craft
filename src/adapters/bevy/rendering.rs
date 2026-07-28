@@ -1,8 +1,8 @@
-use crate::lighting::{DayCycle, LightGrid};
-use crate::world::{
-    BlockGrid, WorldEntity, generated_voxel, stable_hash, surface_height_at_depth, world_to_chunk,
+use crate::adapters::bevy::world::WorldEntity;
+use crate::domain::{
+    BlockGrid, BlockKind, CHUNK_WIDTH, DEPTH_SLICES, DayCycle, LightGrid, WORLD_HEIGHT,
+    generated_voxel, stable_hash, surface_height_at_depth, world_to_chunk,
 };
-use crate::{BlockKind, CHUNK_WIDTH, DEPTH_SLICES, WORLD_HEIGHT};
 use avian2d::prelude::*;
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
@@ -599,12 +599,12 @@ fn set_pixel(pixels: &mut [u8], x: u32, y: u32, color: [u8; 4]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::BlockChunk;
 
     fn empty_grid() -> BlockGrid {
         let mut grid = BlockGrid::new(WORLD_HEIGHT);
         grid.insert_chunk(
-            crate::BlockChunk::from_dense(0, vec![0; (CHUNK_WIDTH * WORLD_HEIGHT) as usize])
-                .unwrap(),
+            BlockChunk::from_dense(0, vec![0; (CHUNK_WIDTH * WORLD_HEIGHT) as usize]).unwrap(),
         );
         grid
     }

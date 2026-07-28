@@ -1,9 +1,10 @@
-use crate::camera::{CameraRig, GameCamera, center_camera};
-use crate::rendering::RenderCatalog;
-use crate::world::{
-    BlockChunk, BlockGrid, PendingWorld, WorldEntity, generate_chunk, world_to_chunk,
+use crate::adapters::bevy::{
+    PendingWorldResource, WorldStateResource,
+    camera::{CameraRig, GameCamera, center_camera},
+    rendering::RenderCatalog,
+    world::WorldEntity,
 };
-use crate::{AppState, BlockKind};
+use crate::{AppState, domain::BlockKind};
 use avian2d::{math::*, prelude::*};
 use bevy::ecs::query::Has;
 use bevy::prelude::*;
@@ -94,7 +95,8 @@ impl Plugin for PlayerPlugin {
 
 fn spawn_player(
     mut commands: Commands,
-    pending: Option<Res<PendingWorld>>,
+    pending: Option<Res<PendingWorldResource>>,
+    world: Option<Res<WorldStateResource>>,
     catalog: Option<Res<RenderCatalog>>,
     existing: Query<(), With<Player>>,
     mut camera: Single<&mut Transform, (With<GameCamera>, Without<Player>)>,
@@ -103,25 +105,14 @@ fn spawn_player(
     if !existing.is_empty() {
         return;
     }
-    let (Some(pending), Some(catalog)) = (pending, catalog) else {
+    let (Some(pending), Some(world), Some(catalog)) = (pending, world, catalog) else {
         return;
     };
-    let requested = Vec2::new(pending.save.player.local_x, pending.save.player.y);
-    let center_chunk = world_to_chunk(requested.x.floor() as i32);
-    let global_chunk = pending.save.player.chunk_x + i64::from(center_chunk);
-    let initial = pending
-        .save
-        .chunks
-        .iter()
-        .find(|chunk| chunk.x == global_chunk)
-        .and_then(|chunk| BlockChunk::from_dense(center_chunk, chunk.blocks.clone()))
-        .unwrap_or_else(|| generate_chunk(pending.save.seed, center_chunk));
-    let mut grid = BlockGrid::new(crate::WORLD_HEIGHT);
-    grid.insert_chunk(initial);
-    let spawn = if grid.player_position_is_safe(requested) {
+    let requested = Vec2::new(pending.snapshot.player.local_x, pending.snapshot.player.y);
+    let spawn = if world.grid.player_position_is_safe(requested) {
         requested
     } else {
-        grid.safe_spawn()
+        world.grid.safe_spawn()
     };
     center_camera(spawn, &mut camera, &mut camera_rig);
     let cube = catalog.player_cube.clone();
@@ -130,7 +121,7 @@ fn spawn_player(
             Player,
             RespawnPoint(spawn),
             Hotbar {
-                selected_slot: pending.save.player.selected_slot,
+                selected_slot: pending.snapshot.player.selected_slot,
             },
             Collider::rectangle(0.70, 1.80),
             LinearVelocity::ZERO,
@@ -212,7 +203,7 @@ fn spawn_player(
                     }
                 });
         });
-    commands.remove_resource::<PendingWorld>();
+    commands.remove_resource::<PendingWorldResource>();
 }
 
 fn spawn_part(

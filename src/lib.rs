@@ -1,29 +1,12 @@
-mod block;
-mod camera;
-mod interaction;
-mod lighting;
-mod persistence;
-mod player;
-mod rendering;
-mod ui;
-mod world;
+pub mod adapters;
+pub mod application;
+pub mod domain;
 
+use adapters::bevy::{RepositoryHandle, RuntimeSet};
+use adapters::storage::ScwRepository;
 use avian2d::prelude::*;
 use bevy::prelude::*;
-
-pub use block::{BlockDef, BlockKind};
-pub use lighting::{DayCycle, LightCell, LightGrid};
-pub use persistence::{SavedChunk, SavedPlayer, WorldSaveV1, WorldStore, blank_save, validate};
-pub use world::{
-    BlockChunk, BlockGrid, WorldSession, generate_chunk, generate_world, generated_voxel,
-    spawn_for_seed, surface_height, surface_height_at_depth, world_to_chunk,
-};
-
-pub const WORLD_HEIGHT: i32 = 80;
-pub const CHUNK_WIDTH: i32 = 32;
-pub const DEPTH_SLICES: u8 = 4;
-pub const GENERATOR_VERSION: u32 = 2;
-pub const SAVE_SCHEMA_VERSION: u32 = 2;
+use std::sync::Arc;
 
 #[derive(States, Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AppState {
@@ -44,17 +27,30 @@ impl Plugin for GamePlugin {
         app.init_state::<AppState>()
             .insert_resource(Time::<Fixed>::from_hz(64.0))
             .insert_resource(Gravity(Vec2::NEG_Y * 25.0))
-            .init_resource::<WorldStore>()
+            .insert_resource(RepositoryHandle(Arc::new(ScwRepository::default())))
+            .configure_sets(
+                Update,
+                (
+                    RuntimeSet::CompletedWork,
+                    RuntimeSet::WorldMaintenance,
+                    RuntimeSet::Commands,
+                    RuntimeSet::Derived,
+                    RuntimeSet::Persistence,
+                )
+                    .chain(),
+            )
             .add_systems(PostStartup, finish_boot)
             .add_plugins((
                 PhysicsPlugins::default().with_length_unit(1.0),
-                rendering::RenderingPlugin,
-                world::WorldPlugin,
-                lighting::LightingPlugin,
-                player::PlayerPlugin,
-                interaction::InteractionPlugin,
-                camera::CameraPlugin,
-                ui::GameUiPlugin,
+                adapters::bevy::rendering::RenderingPlugin,
+                adapters::bevy::world::WorldPlugin,
+                adapters::bevy::lighting::LightingPlugin,
+                adapters::bevy::player::PlayerPlugin,
+                adapters::bevy::interaction::InteractionPlugin,
+                adapters::bevy::camera::CameraPlugin,
+                adapters::bevy::save::SavePlugin,
+                adapters::bevy::session::SessionPlugin,
+                adapters::bevy::ui::GameUiPlugin,
             ));
     }
 }
@@ -73,10 +69,8 @@ mod tests {
         app.add_plugins((MinimalPlugins, bevy::state::app::StatesPlugin))
             .init_state::<AppState>()
             .add_systems(PostStartup, finish_boot);
-
         app.update();
         app.update();
-
         assert_eq!(
             app.world().resource::<State<AppState>>().get(),
             &AppState::MainMenu

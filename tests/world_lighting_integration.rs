@@ -1,6 +1,9 @@
 use bevy::prelude::IVec2;
 use sidecraft::{
-    BlockGrid, CHUNK_WIDTH, LightGrid, SavedChunk, WORLD_HEIGHT, blank_save, generate_chunk,
+    application::{ChunkSnapshot, blank_snapshot},
+    domain::{
+        BlockChunk, BlockGrid, CHUNK_WIDTH, LightGrid, WORLD_HEIGHT, generate_chunk, spawn_for_seed,
+    },
 };
 
 #[test]
@@ -11,19 +14,23 @@ fn persisted_chunks_reconstruct_the_same_light_field() {
         grid.insert_chunk(chunk.clone());
     }
     let before = LightGrid::calculate(&grid);
-    let save = blank_save(
+    let save = blank_snapshot(
         41,
         "Lighting integration".into(),
         chunks
             .iter()
-            .map(|chunk| SavedChunk {
+            .map(|chunk| ChunkSnapshot {
                 x: i64::from(chunk.x()),
                 blocks: chunk.blocks().to_vec(),
             })
             .collect(),
-        grid.safe_spawn(),
+        spawn_for_seed(41),
+        1,
     );
-    let reconstructed = BlockGrid::from_save(&save);
+    let mut reconstructed = BlockGrid::new(WORLD_HEIGHT);
+    for chunk in save.chunks {
+        reconstructed.insert_chunk(BlockChunk::from_dense(chunk.x as i32, chunk.blocks).unwrap());
+    }
     let after = LightGrid::calculate(&reconstructed);
 
     for y in 0..WORLD_HEIGHT {

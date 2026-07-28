@@ -1,5 +1,5 @@
 use bevy::tasks::{AsyncComputeTaskPool, TaskPoolBuilder, block_on};
-use sidecraft::{BlockKind, CHUNK_WIDTH, generate_chunk, surface_height};
+use sidecraft::domain::{BlockKind, CHUNK_WIDTH, generate_chunk, surface_height};
 
 #[test]
 fn chunks_generate_concurrently_without_seams_or_shared_state() {

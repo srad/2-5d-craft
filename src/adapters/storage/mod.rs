@@ -1,11 +1,13 @@
-use crate::{BlockKind, CHUNK_WIDTH, GENERATOR_VERSION, SAVE_SCHEMA_VERSION, WORLD_HEIGHT};
-use bevy::prelude::*;
+use crate::application::{
+    ChunkSnapshot, InvalidWorldEntry, PlayerSnapshot, RepositoryError, SnapshotError, WorldCatalog,
+    WorldId, WorldRepository, WorldSnapshot, WorldSummary, validate_snapshot,
+};
+use crate::domain::{BlockKind, CHUNK_WIDTH, WORLD_HEIGHT};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::io::{self, BufWriter, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::NamedTempFile;
 
 const SCW_MAGIC: &[u8; 4] = b"SCW1";
@@ -17,34 +19,7 @@ const CHUNK_AREA: usize = (CHUNK_WIDTH * WORLD_HEIGHT) as usize;
 const MAX_SAVED_CHUNKS_PER_FILE: usize = 65_536;
 const REGION_CHUNKS: i64 = 64;
 const MANIFEST_FILE: &str = "manifest.scw";
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct WorldSaveV1 {
-    pub schema_version: u32,
-    pub generator_version: u32,
-    pub height: i32,
-    pub name: String,
-    pub seed: u64,
-    pub created_at_unix_s: u64,
-    pub last_played_unix_s: u64,
-    pub day_phase: f32,
-    pub player: SavedPlayer,
-    pub chunks: Vec<SavedChunk>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct SavedPlayer {
-    pub chunk_x: i64,
-    pub local_x: f32,
-    pub y: f32,
-    pub selected_slot: u8,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SavedChunk {
-    pub x: i64,
-    pub blocks: Vec<u8>,
-}
+const SAVE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct ScwMetadataV1 {
@@ -83,31 +58,19 @@ struct ScwRegionRefV1 {
     file_name: String,
 }
 
-#[derive(Resource, Debug, Clone)]
-pub struct WorldStore {
+#[derive(Debug, Clone)]
+pub struct ScwRepository {
     root: PathBuf,
 }
 
 #[derive(Debug)]
-pub struct ListedWorld {
-    pub path: PathBuf,
-    pub save: WorldSaveV1,
-}
-
-#[derive(Debug)]
-pub struct WorldList {
-    pub valid: Vec<ListedWorld>,
-    pub invalid: Vec<(PathBuf, String)>,
-}
-
-#[derive(Debug)]
-pub enum StoreError {
+enum StoreError {
     Io(io::Error),
     Postcard(postcard::Error),
     Compression(io::Error),
+    UnsupportedSchema(u32),
     Format(String),
     Validation(String),
-    Clock,
 }
 
 impl std::fmt::Display for StoreError {
@@ -116,9 +79,11 @@ impl std::fmt::Display for StoreError {
             Self::Io(error) => write!(formatter, "I/O error: {error}"),
             Self::Postcard(error) => write!(formatter, "invalid world metadata: {error}"),
             Self::Compression(error) => write!(formatter, "invalid compressed data: {error}"),
+            Self::UnsupportedSchema(version) => {
+                write!(formatter, "unsupported schema version {version}")
+            }
             Self::Format(error) => write!(formatter, "invalid .scw file: {error}"),
             Self::Validation(error) => write!(formatter, "invalid world: {error}"),
-            Self::Clock => write!(formatter, "system clock is before the Unix epoch"),
         }
     }
 }
@@ -131,110 +96,153 @@ impl From<io::Error> for StoreError {
     }
 }
 
-impl Default for WorldStore {
+impl Default for ScwRepository {
     fn default() -> Self {
         Self::new("worlds")
     }
 }
 
-impl WorldStore {
+impl ScwRepository {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
 
-    pub fn root(&self) -> &Path {
+    #[cfg(test)]
+    fn root(&self) -> &Path {
         &self.root
     }
 
-    pub fn now_unix_s() -> Result<u64, StoreError> {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|duration| duration.as_secs())
-            .map_err(|_| StoreError::Clock)
-    }
-
-    pub fn new_path(&self, seed: u64) -> Result<PathBuf, StoreError> {
+    fn next_available_id(&self, seed: u64) -> Result<WorldId, StoreError> {
         fs::create_dir_all(&self.root)?;
         let base = format!("world-{seed:016x}");
         for suffix in 1_u32.. {
-            let filename = if suffix == 1 {
-                format!("{base}.scw")
+            let id = if suffix == 1 {
+                base.clone()
             } else {
-                format!("{base}-{suffix}.scw")
+                format!("{base}-{suffix}")
             };
-            let path = self.root.join(filename);
+            let path = self.root.join(format!("{id}.scw"));
             if !path.exists() {
-                return Ok(path);
+                return WorldId::new(id).map_err(|error| StoreError::Validation(error.to_string()));
             }
         }
         unreachable!("the numeric suffix space cannot be exhausted")
     }
 
-    pub fn save(&self, path: &Path, save: &WorldSaveV1) -> Result<(), StoreError> {
+    fn save(&self, id: &WorldId, save: &WorldSnapshot) -> Result<(), StoreError> {
         validate(save)?;
         fs::create_dir_all(&self.root)?;
-        self.ensure_path(path)?;
-        if path.is_file() {
-            return atomic_write(&self.root, path, &encode_scw(save)?);
+        let path = self.path_for(id);
+        if path.exists() && !path.is_dir() {
+            return Err(StoreError::Validation(
+                "world save path must be a package directory".into(),
+            ));
         }
-        save_package(path, save)
+        save_package(&path, save)
     }
 
-    pub fn load(&self, path: &Path) -> Result<WorldSaveV1, StoreError> {
-        self.ensure_path(path)?;
-        if path.is_dir() {
-            load_package(path)
-        } else {
-            decode_scw(&fs::read(path)?)
+    fn load(&self, id: &WorldId) -> Result<WorldSnapshot, StoreError> {
+        let path = self.path_for(id);
+        if !path.is_dir() {
+            return Err(StoreError::Validation(
+                "world save path must be a package directory".into(),
+            ));
         }
+        load_package(&path)
     }
 
-    pub fn list(&self) -> Result<WorldList, StoreError> {
+    fn list(&self) -> Result<WorldCatalog, StoreError> {
         fs::create_dir_all(&self.root)?;
-        let mut list = WorldList {
-            valid: Vec::new(),
-            invalid: Vec::new(),
-        };
+        let mut list = WorldCatalog::default();
         for entry in fs::read_dir(&self.root)? {
             let path = entry?.path();
             if path.extension().and_then(|value| value.to_str()) != Some("scw") {
                 continue;
             }
-            match self.load(&path) {
-                Ok(save) => list.valid.push(ListedWorld { path, save }),
-                Err(error) => list.invalid.push((path, error.to_string())),
+            let display_name = path
+                .file_name()
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+                list.invalid.push(InvalidWorldEntry {
+                    display_name,
+                    error: "world package name is not valid UTF-8".into(),
+                });
+                continue;
+            };
+            let id = match WorldId::new(stem) {
+                Ok(id) => id,
+                Err(error) => {
+                    list.invalid.push(InvalidWorldEntry {
+                        display_name,
+                        error: error.to_string(),
+                    });
+                    continue;
+                }
+            };
+            match self.load(&id) {
+                Ok(snapshot) => list.valid.push(WorldSummary {
+                    id,
+                    name: snapshot.name,
+                    last_played_unix_s: snapshot.last_played_unix_s,
+                }),
+                Err(error) => list.invalid.push(InvalidWorldEntry {
+                    display_name,
+                    error: error.to_string(),
+                }),
             }
         }
         list.valid.sort_by(|a, b| {
-            b.save
-                .last_played_unix_s
-                .cmp(&a.save.last_played_unix_s)
-                .then_with(|| a.save.name.cmp(&b.save.name))
-                .then_with(|| a.path.cmp(&b.path))
+            b.last_played_unix_s
+                .cmp(&a.last_played_unix_s)
+                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a.id.cmp(&b.id))
         });
-        list.invalid.sort_by(|a, b| a.0.cmp(&b.0));
+        list.invalid
+            .sort_by(|a, b| a.display_name.cmp(&b.display_name));
         Ok(list)
     }
 
-    fn ensure_path(&self, path: &Path) -> Result<(), StoreError> {
-        if path.parent() != Some(self.root.as_path()) {
-            return Err(StoreError::Validation(
-                "save path is outside the configured world directory".into(),
-            ));
-        }
-        if path.extension().and_then(|value| value.to_str()) != Some("scw") {
-            return Err(StoreError::Validation(
-                "world save path must use the .scw extension".into(),
-            ));
-        }
-        Ok(())
+    fn path_for(&self, id: &WorldId) -> PathBuf {
+        self.root.join(format!("{}.scw", id.as_str()))
     }
 }
 
-fn save_package(path: &Path, save: &WorldSaveV1) -> Result<(), StoreError> {
+impl WorldRepository for ScwRepository {
+    fn next_available_id(&self, seed: u64) -> Result<WorldId, RepositoryError> {
+        ScwRepository::next_available_id(self, seed).map_err(RepositoryError::from)
+    }
+
+    fn list(&self) -> Result<WorldCatalog, RepositoryError> {
+        ScwRepository::list(self).map_err(RepositoryError::from)
+    }
+
+    fn load(&self, id: &WorldId) -> Result<WorldSnapshot, RepositoryError> {
+        ScwRepository::load(self, id).map_err(RepositoryError::from)
+    }
+
+    fn save(&self, id: &WorldId, snapshot: &WorldSnapshot) -> Result<(), RepositoryError> {
+        ScwRepository::save(self, id, snapshot).map_err(RepositoryError::from)
+    }
+}
+
+impl From<StoreError> for RepositoryError {
+    fn from(error: StoreError) -> Self {
+        match error {
+            StoreError::Io(error) => Self::Unavailable(error.to_string()),
+            StoreError::Postcard(error) => Self::Corrupt(error.to_string()),
+            StoreError::Compression(error) => Self::Corrupt(error.to_string()),
+            StoreError::UnsupportedSchema(version) => Self::UnsupportedSchema(version),
+            StoreError::Format(error) => Self::Corrupt(error),
+            StoreError::Validation(error) => Self::InvalidSnapshot(SnapshotError(error)),
+        }
+    }
+}
+
+fn save_package(path: &Path, save: &WorldSnapshot) -> Result<(), StoreError> {
     fs::create_dir_all(path)?;
     let generation = rand::random::<u64>();
-    let mut grouped = BTreeMap::<i64, Vec<SavedChunk>>::new();
+    let mut grouped = BTreeMap::<i64, Vec<ChunkSnapshot>>::new();
     for chunk in &save.chunks {
         grouped
             .entry(chunk.x.div_euclid(REGION_CHUNKS))
@@ -248,10 +256,10 @@ fn save_package(path: &Path, save: &WorldSaveV1) -> Result<(), StoreError> {
         let file_name = format!("region-{region_x}-{content_hash:016x}.scw");
         let region_path = path.join(&file_name);
         if !region_path.exists() {
-            let region_save = WorldSaveV1 {
+            let region_save = WorldSnapshot {
                 last_played_unix_s: 0,
                 day_phase: 0.20,
-                player: SavedPlayer {
+                player: PlayerSnapshot {
                     chunk_x: 0,
                     local_x: 0.5,
                     y: 2.0,
@@ -280,7 +288,7 @@ fn save_package(path: &Path, save: &WorldSaveV1) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn load_package(path: &Path) -> Result<WorldSaveV1, StoreError> {
+fn load_package(path: &Path) -> Result<WorldSnapshot, StoreError> {
     let manifest_bytes = fs::read(path.join(MANIFEST_FILE))?;
     let manifest: ScwPackageManifestV1 = decode_postcard_envelope(&manifest_bytes)?;
     validate_manifest(&manifest)?;
@@ -313,7 +321,7 @@ fn load_package(path: &Path) -> Result<WorldSaveV1, StoreError> {
         chunks.extend(region_save.chunks);
     }
     chunks.sort_by_key(|chunk| chunk.x);
-    let save = save_from_metadata(manifest.metadata, chunks);
+    let save = save_from_metadata(manifest.metadata, chunks)?;
     validate(&save)?;
     Ok(save)
 }
@@ -342,7 +350,7 @@ fn validate_manifest(manifest: &ScwPackageManifestV1) -> Result<(), StoreError> 
     Ok(())
 }
 
-fn hash_region(chunks: &[SavedChunk]) -> u64 {
+fn hash_region(chunks: &[ChunkSnapshot]) -> u64 {
     let mut hash = 0xcbf29ce484222325_u64;
     for chunk in chunks {
         for byte in chunk
@@ -358,9 +366,8 @@ fn hash_region(chunks: &[SavedChunk]) -> u64 {
     hash
 }
 
-fn region_metadata_matches(region: &WorldSaveV1, metadata: &ScwMetadataV1) -> bool {
-    region.schema_version == metadata.schema_version
-        && region.generator_version == metadata.generator_version
+fn region_metadata_matches(region: &WorldSnapshot, metadata: &ScwMetadataV1) -> bool {
+    region.generator_version == metadata.generator_version
         && region.height == metadata.height
         && region.seed == metadata.seed
         && region.created_at_unix_s == metadata.created_at_unix_s
@@ -444,7 +451,7 @@ where
     Ok(value)
 }
 
-fn encode_scw(save: &WorldSaveV1) -> Result<Vec<u8>, StoreError> {
+fn encode_scw(save: &WorldSnapshot) -> Result<Vec<u8>, StoreError> {
     let (header, blocks) = parts_from_save(save)?;
     let encoded_header = postcard::to_allocvec(&header).map_err(StoreError::Postcard)?;
     if encoded_header.len() > MAX_HEADER_BYTES {
@@ -469,7 +476,7 @@ fn encode_scw(save: &WorldSaveV1) -> Result<Vec<u8>, StoreError> {
     Ok(file)
 }
 
-fn decode_scw(file: &[u8]) -> Result<WorldSaveV1, StoreError> {
+fn decode_scw(file: &[u8]) -> Result<WorldSnapshot, StoreError> {
     if file.len() > MAX_FILE_BYTES {
         return Err(StoreError::Format("file is too large".into()));
     }
@@ -517,7 +524,7 @@ fn decode_scw(file: &[u8]) -> Result<WorldSaveV1, StoreError> {
     save_from_parts(header, decoded[header_end..].to_vec())
 }
 
-fn parts_from_save(save: &WorldSaveV1) -> Result<(ScwHeaderV1, Vec<u8>), StoreError> {
+fn parts_from_save(save: &WorldSnapshot) -> Result<(ScwHeaderV1, Vec<u8>), StoreError> {
     validate(save)?;
     let palette = save
         .chunks
@@ -566,7 +573,10 @@ fn parts_from_save(save: &WorldSaveV1) -> Result<(ScwHeaderV1, Vec<u8>), StoreEr
     ))
 }
 
-fn save_from_parts(header: ScwHeaderV1, dense_blocks: Vec<u8>) -> Result<WorldSaveV1, StoreError> {
+fn save_from_parts(
+    header: ScwHeaderV1,
+    dense_blocks: Vec<u8>,
+) -> Result<WorldSnapshot, StoreError> {
     if header.metadata.height != WORLD_HEIGHT {
         return Err(StoreError::Format(format!(
             "expected chunk height {WORLD_HEIGHT}"
@@ -620,17 +630,17 @@ fn save_from_parts(header: ScwHeaderV1, dense_blocks: Vec<u8>) -> Result<WorldSa
             };
             blocks.push(code);
         }
-        chunks.push(SavedChunk { x: chunk_x, blocks });
+        chunks.push(ChunkSnapshot { x: chunk_x, blocks });
     }
 
-    let save = save_from_metadata(header.metadata, chunks);
+    let save = save_from_metadata(header.metadata, chunks)?;
     validate(&save)?;
     Ok(save)
 }
 
-fn metadata_from_save(save: &WorldSaveV1) -> ScwMetadataV1 {
+fn metadata_from_save(save: &WorldSnapshot) -> ScwMetadataV1 {
     ScwMetadataV1 {
-        schema_version: save.schema_version,
+        schema_version: SAVE_SCHEMA_VERSION,
         generator_version: save.generator_version,
         height: save.height,
         name: save.name.clone(),
@@ -645,9 +655,14 @@ fn metadata_from_save(save: &WorldSaveV1) -> ScwMetadataV1 {
     }
 }
 
-fn save_from_metadata(metadata: ScwMetadataV1, chunks: Vec<SavedChunk>) -> WorldSaveV1 {
-    WorldSaveV1 {
-        schema_version: metadata.schema_version,
+fn save_from_metadata(
+    metadata: ScwMetadataV1,
+    chunks: Vec<ChunkSnapshot>,
+) -> Result<WorldSnapshot, StoreError> {
+    if metadata.schema_version != SAVE_SCHEMA_VERSION {
+        return Err(StoreError::UnsupportedSchema(metadata.schema_version));
+    }
+    Ok(WorldSnapshot {
         generator_version: metadata.generator_version,
         height: metadata.height,
         name: metadata.name,
@@ -655,142 +670,62 @@ fn save_from_metadata(metadata: ScwMetadataV1, chunks: Vec<SavedChunk>) -> World
         created_at_unix_s: metadata.created_at_unix_s,
         last_played_unix_s: metadata.last_played_unix_s,
         day_phase: metadata.day_phase,
-        player: SavedPlayer {
+        player: PlayerSnapshot {
             chunk_x: metadata.player_chunk_x,
             local_x: metadata.player_local_x,
             y: metadata.player_y,
             selected_slot: metadata.selected_slot,
         },
         chunks,
-    }
+    })
 }
 
-pub fn validate(save: &WorldSaveV1) -> Result<(), StoreError> {
-    if save.schema_version != SAVE_SCHEMA_VERSION {
-        return Err(StoreError::Validation(format!(
-            "unsupported schema version {}",
-            save.schema_version
-        )));
-    }
-    if save.generator_version != GENERATOR_VERSION {
-        return Err(StoreError::Validation(format!(
-            "unsupported generator version {}",
-            save.generator_version
-        )));
-    }
-    if save.height != WORLD_HEIGHT {
-        return Err(StoreError::Validation(format!(
-            "expected chunk height {WORLD_HEIGHT}"
-        )));
-    }
-    if save.name.trim().is_empty() || save.name.len() > 80 {
-        return Err(StoreError::Validation(
-            "world name must contain 1 to 80 characters".into(),
-        ));
-    }
-    if !save.day_phase.is_finite() || !(0.0..1.0).contains(&save.day_phase) {
-        return Err(StoreError::Validation(
-            "day phase must be finite and in [0, 1)".into(),
-        ));
-    }
-    if !save.player.local_x.is_finite()
-        || !(0.0..CHUNK_WIDTH as f32).contains(&save.player.local_x)
-        || !save.player.y.is_finite()
-    {
-        return Err(StoreError::Validation(
-            "player position must be finite and local x must be inside its chunk".into(),
-        ));
-    }
-    if !(1..=BlockKind::HOTBAR.len() as u8).contains(&save.player.selected_slot) {
-        return Err(StoreError::Validation(
-            "selected hotbar slot is invalid".into(),
-        ));
-    }
-    let mut previous = None;
-    for chunk in &save.chunks {
-        if chunk.blocks.len() != CHUNK_AREA {
-            return Err(StoreError::Validation(format!(
-                "chunk {} has {} blocks; expected {CHUNK_AREA}",
-                chunk.x,
-                chunk.blocks.len()
-            )));
-        }
-        if chunk
-            .blocks
-            .iter()
-            .any(|code| *code != 0 && BlockKind::from_code(*code).is_none())
-        {
-            return Err(StoreError::Validation(format!(
-                "chunk {} contains an invalid block code",
-                chunk.x
-            )));
-        }
-        if previous.is_some_and(|value| value >= chunk.x) {
-            return Err(StoreError::Validation(
-                "chunks must be unique and sorted by x".into(),
-            ));
-        }
-        previous = Some(chunk.x);
-    }
-    Ok(())
-}
-
-pub fn blank_save(seed: u64, name: String, chunks: Vec<SavedChunk>, spawn: Vec2) -> WorldSaveV1 {
-    let now = WorldStore::now_unix_s().unwrap_or(0);
-    WorldSaveV1 {
-        schema_version: SAVE_SCHEMA_VERSION,
-        generator_version: GENERATOR_VERSION,
-        height: WORLD_HEIGHT,
-        name,
-        seed,
-        created_at_unix_s: now,
-        last_played_unix_s: now,
-        day_phase: 0.20,
-        player: SavedPlayer {
-            chunk_x: (spawn.x.floor() as i64).div_euclid(i64::from(CHUNK_WIDTH)),
-            local_x: spawn.x.rem_euclid(CHUNK_WIDTH as f32),
-            y: spawn.y,
-            selected_slot: 1,
-        },
-        chunks,
-    }
+fn validate(save: &WorldSnapshot) -> Result<(), StoreError> {
+    validate_snapshot(save).map_err(|error| StoreError::Validation(error.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        application::{WorldRepository, blank_snapshot},
+        domain::spawn_for_seed,
+    };
+    use glam::Vec2;
     use std::fs::File;
     use tempfile::tempdir;
 
-    fn example_save() -> WorldSaveV1 {
+    fn example_save() -> WorldSnapshot {
         let mut blocks = vec![0; CHUNK_AREA];
         blocks[0] = BlockKind::Bedrock.code();
         blocks[1] = BlockKind::Bedrock.code();
         blocks[(2 * CHUNK_WIDTH + 3) as usize] = BlockKind::Torch.code();
-        blank_save(
+        blank_snapshot(
             7,
             "Example".into(),
-            vec![SavedChunk { x: 0, blocks }],
+            vec![ChunkSnapshot { x: 0, blocks }],
             Vec2::new(2.5, 4.0),
+            10,
         )
     }
 
     #[test]
     fn round_trip_has_magic_compression_and_atomic_overwrite() {
         let directory = tempdir().unwrap();
-        let store = WorldStore::new(directory.path());
-        let path = store.new_path(7).unwrap();
+        let store = ScwRepository::new(directory.path());
+        let id = WorldId::new("example").unwrap();
+        let path = store.path_for(&id);
         let mut save = example_save();
-        store.save(&path, &save).unwrap();
+        WorldRepository::save(&store, &id, &save).unwrap();
         assert!(path.is_dir());
         let bytes = fs::read(path.join(MANIFEST_FILE)).unwrap();
         assert_eq!(&bytes[..SCW_MAGIC.len()], SCW_MAGIC);
         assert!(bytes.len() < CHUNK_AREA);
-        assert_eq!(store.load(&path).unwrap(), save);
+        assert_eq!(WorldRepository::load(&store, &id).unwrap(), save);
 
         save.name = "Updated".into();
-        store.save(&path, &save).unwrap();
-        assert_eq!(store.load(&path).unwrap().name, "Updated");
+        WorldRepository::save(&store, &id, &save).unwrap();
+        assert_eq!(WorldRepository::load(&store, &id).unwrap().name, "Updated");
         let region_count = fs::read_dir(&path)
             .unwrap()
             .filter_map(Result::ok)
@@ -811,31 +746,30 @@ mod tests {
     #[test]
     fn generated_paths_do_not_collide() {
         let directory = tempdir().unwrap();
-        let store = WorldStore::new(directory.path());
-        let first = store.new_path(7).unwrap();
-        File::create(&first).unwrap();
-        let second = store.new_path(7).unwrap();
-        assert_ne!(first, second);
-        assert!(second.ends_with("world-0000000000000007-2.scw"));
+        let store = ScwRepository::new(directory.path());
+        let first = WorldRepository::next_available_id(&store, 7).unwrap();
+        File::create(store.path_for(&first)).unwrap();
+        let second = WorldRepository::next_available_id(&store, 7).unwrap();
+        assert_eq!(second.as_str(), "world-0000000000000007-2");
     }
 
     #[test]
     fn list_is_sorted_reports_invalid_scw_and_ignores_json() {
         let directory = tempdir().unwrap();
-        let store = WorldStore::new(directory.path());
+        let store = ScwRepository::new(directory.path());
         let mut old = example_save();
         old.last_played_unix_s = 1;
         old.name = "Old".into();
-        store.save(&store.root().join("old.scw"), &old).unwrap();
+        WorldRepository::save(&store, &WorldId::new("old").unwrap(), &old).unwrap();
         let mut new = example_save();
         new.last_played_unix_s = 2;
         new.name = "New".into();
-        store.save(&store.root().join("new.scw"), &new).unwrap();
+        WorldRepository::save(&store, &WorldId::new("new").unwrap(), &new).unwrap();
         fs::write(store.root().join("broken.scw"), b"not-scw").unwrap();
         fs::write(store.root().join("legacy.json"), b"{}").unwrap();
 
-        let listed = store.list().unwrap();
-        assert_eq!(listed.valid[0].save.name, "New");
+        let listed = WorldRepository::list(&store).unwrap();
+        assert_eq!(listed.valid[0].name, "New");
         assert_eq!(listed.invalid.len(), 1);
     }
 
@@ -863,21 +797,22 @@ mod tests {
     }
 
     #[test]
-    fn package_partitions_chunks_into_regions_and_loads_legacy_files() {
+    fn package_partitions_chunks_into_regions_and_rejects_legacy_files() {
         let directory = tempdir().unwrap();
-        let store = WorldStore::new(directory.path());
+        let store = ScwRepository::new(directory.path());
         let mut save = example_save();
         let blocks = save.chunks[0].blocks.clone();
         save.chunks = [-65, -1, 0, 64]
             .into_iter()
-            .map(|x| SavedChunk {
+            .map(|x| ChunkSnapshot {
                 x,
                 blocks: blocks.clone(),
             })
             .collect();
-        let package_path = store.new_path(7).unwrap();
-        store.save(&package_path, &save).unwrap();
-        assert_eq!(store.load(&package_path).unwrap(), save);
+        let id = WorldId::new("package").unwrap();
+        let package_path = store.path_for(&id);
+        WorldRepository::save(&store, &id, &save).unwrap();
+        assert_eq!(WorldRepository::load(&store, &id).unwrap(), save);
         let manifest: ScwPackageManifestV1 =
             decode_postcard_envelope(&fs::read(package_path.join(MANIFEST_FILE)).unwrap()).unwrap();
         assert_eq!(
@@ -891,22 +826,25 @@ mod tests {
 
         let legacy_path = store.root().join("legacy.scw");
         fs::write(&legacy_path, encode_scw(&save).unwrap()).unwrap();
-        assert_eq!(store.load(&legacy_path).unwrap(), save);
+        assert!(matches!(
+            WorldRepository::load(&store, &WorldId::new("legacy").unwrap()),
+            Err(RepositoryError::InvalidSnapshot(_))
+        ));
     }
 
     #[test]
     fn large_horizontal_coordinates_round_trip_without_float_precision_loss() {
         let directory = tempdir().unwrap();
-        let store = WorldStore::new(directory.path());
+        let store = ScwRepository::new(directory.path());
         let mut save = example_save();
         save.player.chunk_x = 4_000_000_000_000;
         save.player.local_x = 31.75;
         save.chunks[0].x = 4_000_000_000_000;
-        let path = store.new_path(7).unwrap();
+        let id = WorldId::new("far-away").unwrap();
 
-        store.save(&path, &save).unwrap();
+        WorldRepository::save(&store, &id, &save).unwrap();
 
-        assert_eq!(store.load(&path).unwrap(), save);
+        assert_eq!(WorldRepository::load(&store, &id).unwrap(), save);
     }
 
     #[test]
@@ -914,7 +852,22 @@ mod tests {
         let directory = tempdir().unwrap();
         let file_root = directory.path().join("not-a-directory");
         File::create(&file_root).unwrap();
-        let store = WorldStore::new(&file_root);
-        assert!(matches!(store.new_path(1), Err(StoreError::Io(_))));
+        let store = ScwRepository::new(&file_root);
+        assert!(matches!(
+            WorldRepository::next_available_id(&store, 1),
+            Err(RepositoryError::Unavailable(_))
+        ));
+    }
+
+    #[test]
+    fn schema_two_is_exact_and_older_metadata_is_rejected() {
+        let save = blank_snapshot(1, "World".into(), Vec::new(), spawn_for_seed(1), 1);
+        let mut metadata = metadata_from_save(&save);
+        assert_eq!(metadata.schema_version, 2);
+        metadata.schema_version = 1;
+        assert!(matches!(
+            save_from_metadata(metadata, Vec::new()),
+            Err(StoreError::UnsupportedSchema(1))
+        ));
     }
 }

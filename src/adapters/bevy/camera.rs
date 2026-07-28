@@ -1,6 +1,8 @@
 use crate::AppState;
-use crate::lighting::DayCycle;
-use crate::player::Player;
+use crate::{
+    adapters::bevy::{DayCycleResource, player::Player},
+    domain::WORLD_HEIGHT,
+};
 use bevy::camera::{ClearColorConfig, Hdr, ScalingMode};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::post_process::bloom::Bloom;
@@ -206,7 +208,7 @@ fn follow_player(
     rig.logical_position = clamp_camera_vertical(
         rig.logical_position,
         projection.area.half_size().y,
-        crate::WORLD_HEIGHT as f32,
+        WORLD_HEIGHT as f32,
     );
     let target = Vec3::new(
         snap(rig.logical_position.x, projection.scale),
@@ -225,7 +227,7 @@ pub(crate) fn center_camera(target: Vec2, camera: &mut Transform, rig: &mut Came
 }
 
 fn animate_environment(
-    day: Res<DayCycle>,
+    day: Res<DayCycleResource>,
     mut ambient: Single<&mut AmbientLight, With<GameCamera>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     bands: Query<(&SkyBand, &MeshMaterial3d<StandardMaterial>)>,
