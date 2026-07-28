@@ -1,13 +1,33 @@
 # Sidecraft
 
-Sidecraft is a small 2.5D, side-view block sandbox built with Rust, Bevy 0.19,
-and Avian2D. It turns the original non-working skeleton into a playable
+Sidecraft is a 2.5D, side-view living-builder prototype built with Rust, Bevy
+0.19, and Avian2D. It turns the original non-working skeleton into a playable
 foundation with generated terrain, movement, mining, placement, lighting, and
 durable world saves.
 
-The visual direction is a compact, pixel-art world with orthographic depth,
-inspired by early mobile side-view building games rather than a full 3D
-Minecraft camera.
+The world is generated and rendered as real 3D voxels, while movement and
+interaction remain side-on. The intended result is a polished, low-poly world
+with an editable foreground, an editable backwall, and generated scenery behind
+them—not a flat 2D tile map or a free-camera Minecraft clone.
+
+The product direction is a systemic living-builder focused on homesteading,
+crafting and technology, exploration, climate, fluids, gravity, and plant
+growth. [The Blockheads](https://theblockheads.net/) and its
+[early mobile presentation](https://toucharcade.com/2012/04/23/chopper-developer-majic-jungle-announces-2d-minecraft-inspired-ios-title-the-blockheads/)
+are important references.
+
+## Project status
+
+The current baseline is playable but remains a foundation. Only the foreground
+slice is editable; the rear slices are generated visual depth. Block
+simulation, a persistent backwall, finite inventory, crafting, ecology, audio,
+and final presentation are not implemented yet.
+
+- [`ROADMAP.md`](ROADMAP.md) is the cross-session implementation plan.
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) is the binding architecture contract.
+
+Prototype saves and internal APIs may be invalidated at any time. Obsolete
+formats and implementations are deleted rather than migrated.
 
 ## Play
 
@@ -84,12 +104,14 @@ offset, alongside hotbar selection, timestamps, and day phase. Autosave
 compression and I/O run on Bevy's I/O task pool.
 
 Schema 2 is intentionally a fresh format. Legacy JSON metadata saves are
-neither loaded nor migrated. The loader still accepts schema-compatible
-single-file SCW1 worlds.
+neither loaded nor migrated. The current loader still accepts a
+schema-compatible single-file SCW1 layout; this is known prototype debt, not a
+compatibility promise. Roadmap item M1.1 deletes it, and M2 replaces the
+current save model with exact-schema SCW version 3.
 
 ## Architecture
 
-The library is split into focused Bevy plugins and pure data layers:
+The current library is organized into Bevy plugins and data modules:
 
 ```text
 src/
@@ -111,13 +133,19 @@ gameplay. Chunk meshes, merged colliders, and light data are derived from it.
 Modified chunks retain global `i64` identities when their local simulation
 coordinates are rebased or their live scenes unload.
 
+Several modules currently combine too many responsibilities. The target
+dependency direction, mutation boundary, simulation contract, threading rules,
+SCW schema policy, and file-size limits are defined in
+[`ARCHITECTURE.md`](ARCHITECTURE.md). Their staged implementation is tracked in
+[`ROADMAP.md`](ROADMAP.md).
+
 ## Verification
 
 ```powershell
 cargo fmt --all -- --check
-cargo check --all-targets
-cargo test --all-targets
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets --all-features
+cargo build --release
 git diff --check
 ```
 
@@ -151,9 +179,12 @@ adapter.
 
 ## Current scope
 
-This is a solid prototype foundation, not a feature-complete game. Crafting,
-finite inventory stacks, mobs, fluids, audio, touch controls, and multiplayer
-are deliberately out of scope for now.
+This is a playable prototype foundation, not a feature-complete game. The
+initial roadmap covers architecture, a persistent backwall, deterministic
+fluids/gravity/plants, builder progression, ecology, presentation, and
+large-world performance. Multiplayer, free 3D movement, colony automation,
+boss-centric progression, a public mod API, touch-first UI, and all legacy
+migration paths are deferred beyond that roadmap.
 
 ## License
 

@@ -1,0 +1,299 @@
+# Sidecraft Roadmap
+
+Sidecraft is a high-quality, low-poly living builder: a three-dimensionally
+generated voxel world presented as a side-on 2.5D game. The player inhabits one
+foreground slice, builds against an editable backwall, and sees additional
+generated depth behind it.
+
+The direction takes inspiration from the large simulated worlds, climate,
+caves, water, plants, and technology progression of
+[The Blockheads](https://theblockheads.net/), while preserving Sidecraft's own
+3D voxel presentation.
+
+## Status legend
+
+- `[x]` complete
+- `[~]` active; at most one item may use this status
+- `[ ]` planned
+- `[!]` caution or blocker
+- `[-]` abandoned or failed
+
+## Resume here
+
+- Active item: none
+- Next item: M1.1 — establish module boundaries and remove obsolete loading
+- Blocker: none
+- Last completed milestone: M0 — playable foundation
+- Verification baseline: confirmed 2026-07-28; formatting, Clippy with warnings
+  denied, all automated tests, and the release build passed locally
+
+At the start of a work session, mark exactly one item `[~]`. At the end, change
+it to `[x]`, `[!]`, or `[ ]`, record the next concrete item here, and record any
+failed verification beside the affected milestone. Never mark work complete
+from code inspection alone.
+
+## Product decisions
+
+- Gameplay is a living-builder loop: systemic terrain, homesteading,
+  crafting/technology, exploration, and gentle survival.
+- The world generator is three-dimensional but renders four bounded depth
+  slices.
+- Depth 0 is the colliding foreground and player plane.
+- Depth 1 is an editable, persistent, non-colliding backwall.
+- Depths 2 and 3 are deterministic render-only scenery.
+- Simulation follows a Minecraft-like activation model: render distance is
+  larger than simulation distance; inactive chunks freeze except for explicit
+  bounded ticking areas.
+- Performance matters, but deterministic serial behavior is the reference
+  before parallel optimization.
+- Prototype saves and internal APIs have no compatibility guarantee. Old
+  implementations are deleted rather than migrated.
+- Verification is local. The project does not use GitHub Actions or another
+  hosted build server.
+
+## M0 — Playable foundation `[x]`
+
+- `[x]` Main menu, world selection, loading, gameplay HUD, pause, and saving.
+- `[x]` Side-on player movement and interaction locked to the foreground.
+- `[x]` Four correlated voxel depth slices rendered through Bevy's 3D stack.
+- `[x]` Deterministic terrain with caves, ores, vegetation, and bedrock.
+- `[x]` Lazy multi-threaded horizontal chunk generation and unloading.
+- `[x]` Floating origin using global `i64` chunk identities.
+- `[x]` Chunk-batched meshes, derived lighting, and merged 2D colliders.
+- `[x]` Mining, block placement, an eight-slot block hotbar, and torches.
+- `[x]` Regional Postcard/Zstandard SCW packages and atomic manifest writes.
+- `[x]` Unit, integration, lifecycle, and rendered-smoke test foundations.
+- `[!]` Foreground, UI, rendering, and persistence responsibilities are
+  concentrated in oversized modules.
+- `[!]` The loader still accepts a schema-compatible single-file SCW1 layout.
+- `[!]` Rear depth slices are generated scenery, not an editable backwall.
+- `[!]` There is no bounded block-simulation engine.
+
+## M1 — Architecture foundation `[ ]`
+
+### M1.1 Boundaries and legacy deletion
+
+- `[ ]` Separate plain-Rust domain code, application orchestration, Bevy and
+  platform adapters, and the composition root.
+- `[ ]` Split existing oversized files by responsibility, targeting 400
+  nonblank production lines and requiring justification above 600.
+- `[ ]` Separate authoritative world storage, stream state, render state,
+  persistence coordination, and UI session state.
+- `[ ]` Delete the single-file SCW loader, its data paths, compatibility
+  branches, and compatibility tests.
+- `[ ]` Delete other unused APIs and old representations found during the
+  boundary refactor; do not add wrappers or aliases.
+
+### M1.2 Mutation and derived state
+
+- `[ ]` Introduce `VoxelPos`, `VoxelLayer`, `BlockState`, and read-only
+  `WorldView` domain types.
+- `[ ]` Make `WorldMutator` the sole write boundary for player, generation,
+  loading, simulation, and debug changes.
+- `[ ]` Add atomic multi-cell proposals with preconditions and deterministic
+  conflict resolution.
+- `[ ]` Dispatch one mutation report into independent render, lighting,
+  collision, persistence, and simulation dirty sets.
+- `[ ]` Coalesce all derived rebuilds to once per chunk/layer per frame.
+
+### M1.3 Local quality gate
+
+- `[ ]` Add one PowerShell command that runs formatting checks, Clippy, all
+  tests, and a release build.
+- `[ ]` Ensure every resulting domain/application module has focused tests.
+- `[ ]` Document any unavoidable module-size exception in `ARCHITECTURE.md`.
+- `[ ]` Run the complete baseline locally and resolve or record every failure.
+
+M1 is complete when no authoritative block write bypasses `WorldMutator`, the
+legacy reader is absent, module boundaries follow `ARCHITECTURE.md`, and all
+local gates pass.
+
+## M2 — Layered world and fresh SCW schema `[ ]`
+
+### M2.1 Persistent layers
+
+- `[ ]` Store foreground and backwall as independent dense chunk layers.
+- `[ ]` Initialize both layers from depths 0 and 1 of the 3D generator.
+- `[ ]` Keep depths 2 and 3 generator-derived and render-only.
+- `[ ]` Make the backwall editable and persistent without creating colliders.
+- `[ ]` Include the backwall in lighting and depth-aware material presentation.
+- `[ ]` Default interaction to foreground; use `Tab` to select backwall and
+  show the active layer in the HUD.
+- `[ ]` Test overlapping foreground/backwall blocks, negative coordinates,
+  chunk edges, unload/reload, and save/reload.
+
+### M2.2 Streaming
+
+- `[ ]` Configure simulation radius 3, render radius 5, and unload radius 7 for
+  32-block horizontal chunks.
+- `[ ]` Prioritize load/generation jobs nearest-first.
+- `[ ]` Limit in-flight work according to available worker capacity.
+- `[ ]` Tag results with session and generator identity and discard stale or
+  cancelled results before commit.
+- `[ ]` Preserve deterministic generation regardless of task completion order.
+
+### M2.3 SCW schema 3
+
+- `[ ]` Replace current save structs with one current-schema representation;
+  do not keep version-suffixed legacy Rust types.
+- `[ ]` Require `SCW1` plus exact `schema_version = 3`.
+- `[ ]` Encode metadata, palettes, region references, and pending ticks with
+  Postcard, then compress SCW payloads with Zstandard.
+- `[ ]` Reserve dense code 0 for air and codes 1–255 for the per-region
+  non-air `BlockState` palette.
+- `[ ]` Store dense one-byte foreground and backwall arrays for each changed
+  chunk.
+- `[ ]` Persist global `world_tick`, next tick sequence, player/day metadata,
+  generator version, and per-region pending ticks.
+- `[ ]` Write immutable content-addressed regions before atomically publishing
+  the manifest.
+- `[ ]` Serialize async save publication, coalesce requests, and reject stale
+  completion.
+- `[ ]` Reject wrong magic, schema, checksum, framing, compression, ordering,
+  palette, dimensions, or runtime values without fallback.
+
+M2 is complete when both editable layers survive long-distance streaming and a
+fresh save/reload, unsupported worlds fail visibly, and interrupted/stale saves
+cannot replace the last valid manifest.
+
+## M3 — Deterministic living-world simulation `[ ]`
+
+### M3.1 Clock and activation
+
+- `[ ]` Add an independent 20 TPS simulation clock without changing Bevy's
+  fixed clock or Avian physics schedule.
+- `[ ]` Run at most four logical simulation steps per rendered frame and cap
+  accumulated wall-time at 200 ms.
+- `[ ]` Advance only while playing; pause, loading, and process downtime do not
+  catch up.
+- `[ ]` Simulate only the active radius from `SimulationRegionProvider`.
+- `[ ]` Freeze inactive chunks and persist their pending scheduled ticks.
+- `[ ]` Add optional bounded ticking areas without coupling rules to the
+  current single-player region.
+
+### M3.2 Deterministic rule engine
+
+- `[ ]` Evaluate every rule against one immutable tick state.
+- `[ ]` Sort atomic proposals by rule priority, source position, and stable
+  sequence before resolving conflicts.
+- `[ ]` Derive random samples from seed, world tick, global chunk, layer, and
+  attempt; never depend on hash-map order or a mutable global RNG.
+- `[ ]` Process at most 4,096 scheduled proposals plus three random samples per
+  active foreground chunk per tick.
+- `[ ]` Leave overflow queued in stable order and expose backlog diagnostics.
+- `[ ]` Defer cross-frontier work instead of force-loading inactive chunks.
+
+### M3.3 Initial rules
+
+- `[ ]` Water flows down before sideways, uses levels 0–7, updates every five
+  ticks, and renews a source between two valid sources.
+- `[ ]` Lava flows down before sideways, updates every 30 ticks, and never
+  renews sources.
+- `[ ]` Water/lava contacts deterministically form obsidian, cobblestone, or
+  stone according to source and flow state.
+- `[ ]` Sand and gravel move down one cell per tick using atomic two-cell
+  proposals and stack deterministically.
+- `[ ]` Render falling blocks with interpolation without making physics
+  entities authoritative.
+- `[ ]` Plants use random ticks and require valid substrate, free space, and
+  sufficient light.
+- `[ ]` Schedule affected neighbors for no earlier than the next tick to avoid
+  unbounded same-tick cascades.
+
+### M3.4 Persistence and performance
+
+- `[ ]` Snapshot block arrays and pending queues at one revision.
+- `[ ]` Reload scheduled ticks in stable order and ignore stale expected-block
+  ticks safely.
+- `[ ]` Prove identical results for equal seed, commands, logical ticks, and
+  activation history.
+- `[ ]` Establish a serial benchmark baseline for default radius and maximum
+  per-tick budget.
+- `[ ]` Add chunk-parallel immutable evaluation only if release benchmarks show
+  a material gain; retain deterministic single-threaded merge and commit.
+
+M3 is complete when exact-tick tests cover fluids, gravity, growth, conflicts,
+activation, persistence, overload, and physics-clock independence.
+
+## M4 — Builder progression `[ ]`
+
+- `[ ]` Add finite inventory stacks and world item drops.
+- `[ ]` Consume blocks on placement and generate data-driven drops on mining.
+- `[ ]` Add replaceable data-driven recipes and crafting stations.
+- `[ ]` Add tool tiers, mining suitability, durability, and repair/replacement
+  loops.
+- `[ ]` Add workbench and furnace processing using scheduled simulation work.
+- `[ ]` Persist inventory, equipment, stations, and processing state in a new
+  exact save schema; invalidate schema 3 rather than migrating it.
+- `[ ]` Test complete gather, craft, place, save, and reload journeys.
+
+M4 is complete when a new player can gather resources, improve tools, build a
+home, process materials, and resume that progression after reload.
+
+## M5 — Ecology and exploration `[ ]`
+
+- `[ ]` Add biome-dependent terrain, resources, vegetation, and surface color.
+- `[ ]` Add temperature, precipitation, weather, and seasons.
+- `[ ]` Expand plant rules into farming and self-propagating ecology.
+- `[ ]` Add caves, deposits, ruins, and other deterministic exploration goals.
+- `[ ]` Add gentle hunger, shelter, temperature, or equivalent survival
+  pressures without making combat the primary loop.
+- `[ ]` Test long-running ecology determinism, inactive-region behavior, and
+  bounded workload.
+
+M5 is complete when homesteading, exploration, climate, and the simulation
+engine form a coherent living-builder loop.
+
+## M6 — Presentation, usability, and scale `[ ]`
+
+- `[ ]` Refine low-poly block materials, face variation, bevel/highlight cues,
+  depth fog, ambient depth, shadows, and day/night presentation.
+- `[ ]` Add fluid surfaces, falling-block interpolation, plant animation,
+  particles, weather effects, and responsive interaction feedback.
+- `[ ]` Add music, ambient sound, interaction audio, and volume controls.
+- `[ ]` Improve rebinding, controller support, accessibility, and UI scaling.
+- `[ ]` Profile generation, simulation, mesh rebuilding, lighting, saving, and
+  memory during sustained long-distance travel.
+- `[ ]` Add stress tests for negative and positive `i64` coordinates, repeated
+  origin rebasing, rapid streaming reversals, large save sets, and simulation
+  backlogs.
+- `[ ]` Tune parallelism and budgets from recorded release-mode measurements.
+
+M6 is complete when the side-on plane is always readable, the rear depth is
+visually rich, long sessions remain stable, and presentation supports the
+living-builder identity.
+
+## Deferred beyond the initial roadmap
+
+- Multiplayer and network save compatibility
+- Infinite playable depth or free 3D player movement
+- Colony automation and large NPC settlements
+- Boss-centric progression
+- A public mod API or compatibility promises
+- Touch-first/mobile UI
+- Any legacy save, API, or behavior migration
+
+## Milestone verification
+
+Every milestone must run:
+
+```powershell
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets --all-features
+cargo build --release
+git diff --check
+```
+
+Testing is divided by responsibility:
+
+- Unit tests cover every domain and application module containing logic.
+- Headless integration tests cover Bevy state, adapter boundaries, streaming,
+  mutation propagation, physics integration, and asynchronous lifecycle.
+- End-to-end tests exercise menu-to-world, interaction, simulation, saving,
+  reloading, long-distance travel, and visible failure handling.
+- A real-GPU smoke test covers final rendering because headless tests cannot
+  prove visual quality.
+
+A milestone is not `[x]` until its implementation, tests, documentation,
+architecture review, and relevant manual smoke test are complete.

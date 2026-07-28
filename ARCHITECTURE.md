@@ -1,0 +1,293 @@
+# Sidecraft Architecture
+
+This document is the binding architecture contract for Sidecraft. The project
+is a prototype, so obsolete implementations and data formats are removed
+instead of preserved. `ROADMAP.md` records the work required to bring the
+current code into compliance.
+
+## Core principles
+
+- Keep one responsibility per module and one reason for each component to
+  change.
+- Keep game rules independent from Bevy ECS, rendering, physics, storage, and
+  operating-system APIs.
+- Point dependencies inward: adapters depend on the application layer, and the
+  application layer depends on the domain.
+- Route every world change through one mutation boundary.
+- Introduce interfaces only where an implementation is expected to be
+  replaceable or where a side effect must be isolated.
+- Prefer deterministic, bounded work over implicit global behavior.
+- Return typed errors from runtime paths. Panics are reserved for tests and
+  invariants that cannot be violated by world data or user input.
+- Delete superseded APIs, readers, schemas, aliases, feature flags, and tests.
+  There is no backwards-compatibility layer during the prototype phase.
+
+## Dependency boundaries
+
+The target dependency direction is:
+
+```text
+composition root
+    |
+    +-- Bevy and platform adapters
+    |       |
+    |       +-- application services
+    |               |
+    |               +-- domain model and rules
+    |
+    +-- storage adapter implementing application ports
+```
+
+### Domain
+
+The domain is plain Rust. It owns:
+
+- block identifiers, states, and gameplay properties;
+- global coordinates, chunk coordinates, layers, and dense chunk storage;
+- deterministic terrain generation;
+- immutable world queries and atomic mutation proposals;
+- simulation clocks, work queues, rules, and conflict resolution.
+
+The domain must not depend on Bevy entities, assets, meshes, input, UI,
+Avian, files, compression, or task pools.
+
+### Application
+
+The application layer owns use cases and lifecycle:
+
+- the active world session and its revision;
+- chunk requests, activation, loading, generation, and unloading;
+- player/debug commands that request world mutations;
+- simulation orchestration;
+- save snapshot creation and save-job serialization;
+- dirty-state propagation to adapters.
+
+It may depend on domain types and small ports, but not on concrete rendering or
+filesystem implementations.
+
+### Adapters
+
+Adapters translate between application/domain data and external systems:
+
+- Bevy startup, schedules, state transitions, input, UI, and audio;
+- Avian bodies, collision queries, and colliders;
+- cameras, lighting, materials, meshes, particles, and animation;
+- SCW files, Postcard, Zstandard, atomic filesystem operations, and task pools.
+
+Adapters may cache derived state. They never become authoritative for block
+state.
+
+### Composition root
+
+The composition root selects concrete adapters, registers systems, and defines
+their ordering. It contains no game rules.
+
+## World model
+
+The persistent gameplay model uses these concepts:
+
+```rust
+enum VoxelLayer {
+    Foreground,
+    Backwall,
+}
+
+struct VoxelPos {
+    global_x: i64,
+    y: i32,
+    layer: VoxelLayer,
+}
+
+struct BlockState {
+    id: BlockId, // u16 newtype
+    variant: u8,
+}
+```
+
+- Foreground is editable, simulated, rendered, and colliding.
+- Backwall is editable, persistent, rendered, and participates in lighting,
+  but never creates player collision.
+- Render depths 2 and 3 are deterministic generator output. They are not
+  mutable world layers and are not saved.
+- The generator samples a real three-dimensional voxel field using global
+  horizontal position, vertical position, and depth. Depths 0 and 1 initialize
+  the persistent layers; deeper samples provide scenery.
+- Global horizontal identities use `i64`. Local `f32` coordinates are only
+  temporary rendering and physics coordinates around the floating origin.
+- An absent chunk means unmodified generator output. A chunk becomes persistent
+  when its blocks or pending simulation state differ from that output.
+
+## World mutation boundary
+
+`WorldMutator` is the only component allowed to change authoritative chunks.
+Direct writes by input, UI, simulation, generation, loading, rendering, or
+debug systems are forbidden.
+
+Mutations use atomic proposals:
+
+```rust
+struct MutationProposal {
+    preconditions: Vec<BlockPrecondition>,
+    writes: Vec<BlockWrite>,
+    scheduled_ticks: Vec<ScheduledTickRequest>,
+    priority: RulePriority,
+    source: VoxelPos,
+    sequence: u64,
+}
+```
+
+- A proposal is accepted or rejected as a unit. A two-cell sand movement can
+  never apply only its source or destination write.
+- Simulation evaluates an immutable tick state and produces proposals. It does
+  not mutate the world while rules are running.
+- Proposals are ordered by priority, source position, then sequence. A proposal
+  is accepted only when all preconditions still match and none of its writes
+  conflict with an already accepted proposal.
+- Player and application commands use the same commit path as simulation.
+- A successful commit increments the world revision and returns a
+  `MutationReport`.
+
+The report is dispatched into separate dirty sets for rendering, lighting,
+collision, persistence, and simulation-neighbor scheduling. Each adapter owns
+and drains its dirty set. A chunk/layer is rebuilt at most once per rendered
+frame regardless of how many cells changed.
+
+## Simulation
+
+`SimulationEngine` evaluates registered `SimulationRule` implementations
+against a `WorldView`. `SimulationRegionProvider` supplies the active horizontal
+chunks. These are replaceable application/domain boundaries; individual helper
+types do not need traits.
+
+### Clock
+
+- World simulation runs at a logical maximum of 20 ticks per second.
+- The simulation clock is independent from Bevy's global fixed timestep and
+  Avian physics.
+- The application accumulates virtual frame time only while `Playing`.
+- It executes at most four simulation steps per rendered frame.
+- Accumulated wall-time is capped at 200 ms. Under sustained overload, game
+  time slows instead of skipping logical ticks or attempting unbounded
+  catch-up.
+- `world_tick` increments only when a complete simulation step executes.
+- Pausing, loading, and time spent outside the process do not advance
+  simulation.
+
+### Determinism and activation
+
+Simulation is deterministic for the same seed, commands, logical tick count,
+and chunk-activation history.
+
+- Random samples derive from world seed, world tick, global chunk, layer, and
+  attempt index. Hash-map iteration order and a mutable global RNG cannot affect
+  results.
+- Scheduled ticks use the stable key `(due_world_tick, priority,
+  global_chunk_x, position, sequence)`.
+- Default simulation radius is 3 chunks, render radius is 5, and unload radius
+  is 7. All are configuration values.
+- Inactive chunks freeze. They receive no random ticks and no wall-clock
+  catch-up.
+- Pending ticks remain persisted. Overdue work rejoins the normal bounded queue
+  when its chunk activates.
+- Simulation never force-loads an inactive frontier chunk. Boundary work is
+  deferred until that chunk becomes active.
+- Optional bounded ticking areas are supplied by the same region provider.
+  Future multiplayer support can use the union of player regions without
+  changing rule code.
+
+Each tick processes at most 4,096 scheduled proposals plus three deterministic
+random samples per active foreground chunk. Excess work stays queued in stable
+order. Initial evaluation is serial and serves as the correctness reference.
+Chunk-parallel evaluation is allowed only after profiling, uses immutable
+inputs, and performs one deterministic merge before committing.
+
+## Threading and asynchronous work
+
+- Generation requests contain the world session identity, generator version,
+  seed, and global chunk coordinate.
+- Workers return owned chunk data and never access ECS or live world storage.
+- Results are committed only if the session still matches and the chunk remains
+  requested.
+- Requested chunks are prioritized nearest-first. Render and unload hysteresis
+  prevent task churn.
+- Save workers operate on immutable snapshots captured after a complete
+  mutation commit.
+- One save coordinator serializes publication, coalesces queued requests, and
+  prevents an older completion from replacing a newer manifest.
+- A chunk is marked clean only when its current revision still equals the
+  revision captured in the completed snapshot.
+
+## SCW persistence
+
+Only the current SCW schema is accepted. A structural change bumps
+`schema_version`, deletes the previous reader and tests, and intentionally
+invalidates existing prototype worlds.
+
+The next schema is exactly version 3:
+
+- Every file begins with an `SCW1` envelope.
+- Postcard encodes metadata, palettes, region references, and scheduled ticks.
+- Zstandard compresses each payload.
+- Palette value `0` means air. Values `1..=255` index at most 255 non-air
+  `BlockState` entries.
+- Each saved chunk has dense row-major one-byte-per-block foreground and
+  backwall arrays.
+- Region files are immutable and content-addressed. Unchanged references are
+  reused.
+- Region files are flushed and synced before an atomically replaced manifest
+  publishes the new snapshot.
+- Obsolete regions are removed only after manifest publication. Failed cleanup
+  is harmless and retryable.
+- The manifest stores seed, generator version, world dimensions, player state,
+  day state, `world_tick`, the next tick sequence, and sorted region references.
+- Region content includes pending scheduled ticks from the same world revision
+  as its block arrays.
+
+Magic, schema, framing, decompression, palette, dimensions, ordering, checksum,
+and runtime fields are validated before data enters the domain. Invalid or
+incompatible data produces a visible typed error. It is never silently
+regenerated or passed to an older reader.
+
+## Bevy ordering
+
+The application schedule preserves this order:
+
+1. Accept completed load/generation tasks.
+2. Translate input and UI actions into application commands.
+3. Commit external world commands.
+4. Advance zero or more independent world-simulation ticks.
+5. Dispatch mutation reports into adapter dirty sets.
+6. Rebuild lighting, meshes, and colliders from authoritative data.
+7. Capture or queue save snapshots.
+
+Avian continues to use its independently configured fixed physics schedule.
+Changing simulation TPS must not change player movement, collision, or camera
+behavior.
+
+## Module and interface rules
+
+- A module has one primary responsibility and a narrow public surface.
+- Production files target 400 nonblank lines. Crossing 600 lines requires a
+  responsibility-based split or a written exception in this document.
+- Tests larger than the unit under test move to a dedicated test module.
+- Prefer concrete types inside a boundary. Use a trait for storage,
+  simulation-region selection, or another implementation that tests replace.
+- Do not create pass-through managers, catch-all utility modules, global
+  mutable state, or cyclic plugin dependencies.
+- Public domain values validate invariants at construction. Raw indices and
+  coordinate conversions stay private to their owning module.
+- Performance-sensitive collections and allocation behavior are measured
+  before being made more complex.
+
+## Verification contract
+
+- Every domain and application module with logic has unit tests.
+- Cross-boundary behavior has headless Bevy integration tests.
+- Complete user journeys have end-to-end tests.
+- Rendering has automated data/asset tests plus a real-GPU smoke test; brittle
+  pixel-perfect snapshots are not required.
+- Deterministic tests use explicit seeds and logical tick counts.
+- Persistence tests cover interrupted writes, stale async completion, corrupt
+  input, negative coordinates, region boundaries, and reload equivalence.
+- No milestone is complete while a relevant module is untested or any required
+  local verification gate fails.
