@@ -4,13 +4,13 @@ use bevy::window::PrimaryWindow;
 use crate::{
     AppState,
     adapters::bevy::{
-        RuntimeSet, WorldStateResource,
+        RuntimeSet, WorldSessionResource, WorldStateResource,
         camera::GameCamera,
         player::{Hotbar, Player},
         rendering::{RenderCatalog, SelectionOutline, spawn_selection_outline},
-        world::{WorldPresentation, mark_world_visuals_dirty},
+        world::WorldMutationMessage,
     },
-    application::{place_tile, remove_tile},
+    application::{break_block, place_block},
     domain::{BlockTarget, target_from_ray, tile_overlaps_player},
 };
 
@@ -84,7 +84,8 @@ fn update_target(
         ray.origin,
         ray.direction.as_vec3(),
         player.translation.truncate(),
-        &world.grid,
+        &world.view(),
+        world.origin_chunk(),
     );
 }
 
@@ -94,9 +95,10 @@ fn mine_target(
     target: Res<BlockTargetResource>,
     mut mining: ResMut<MiningState>,
     mut world: Option<ResMut<WorldStateResource>>,
-    mut presentation: Option<ResMut<WorldPresentation>>,
+    session: Option<Res<WorldSessionResource>>,
+    mut mutations: MessageWriter<WorldMutationMessage>,
 ) {
-    let (Some(world), Some(presentation)) = (world.as_mut(), presentation.as_mut()) else {
+    let (Some(world), Some(session)) = (world.as_mut(), session) else {
         return;
     };
     if !mouse.pressed(MouseButton::Left) {
@@ -111,18 +113,25 @@ fn mine_target(
         mining.target = Some(coordinate);
         mining.elapsed = 0.0;
     }
-    let Some(kind) = world.grid.get(coordinate) else {
+    let position = world.local_to_voxel(coordinate);
+    let Some(state) = world.view().block(position) else {
         *mining = MiningState::default();
         return;
     };
-    if !kind.breakable() {
+    if !state.breakable() {
         mining.elapsed = 0.0;
         return;
     }
     mining.elapsed += time.delta_secs();
-    if mining.elapsed >= kind.def().hardness_seconds {
-        remove_tile(world, coordinate);
-        mark_world_visuals_dirty(presentation, coordinate.x);
+    if mining.elapsed >= state.def().hardness_seconds {
+        if let Ok(result) = break_block(world, position)
+            && !result.report.is_empty()
+        {
+            mutations.write(WorldMutationMessage {
+                world_id: session.id.clone(),
+                report: result.report,
+            });
+        }
         *mining = MiningState::default();
     }
 }
@@ -132,21 +141,27 @@ fn place_selected(
     target: Res<BlockTargetResource>,
     player: Single<(&Transform, &Hotbar), With<Player>>,
     mut world: Option<ResMut<WorldStateResource>>,
-    mut presentation: Option<ResMut<WorldPresentation>>,
+    session: Option<Res<WorldSessionResource>>,
+    mut mutations: MessageWriter<WorldMutationMessage>,
 ) {
     if !mouse.just_pressed(MouseButton::Right) {
         return;
     }
-    let (Some(coordinate), Some(world), Some(presentation)) =
-        (target.adjacent, world.as_mut(), presentation.as_mut())
+    let (Some(coordinate), Some(world), Some(session)) = (target.adjacent, world.as_mut(), session)
     else {
         return;
     };
     if tile_overlaps_player(coordinate, player.0.translation.truncate()) {
         return;
     }
-    if place_tile(world, coordinate, player.1.selected_kind()) {
-        mark_world_visuals_dirty(presentation, coordinate.x);
+    let position = world.local_to_voxel(coordinate);
+    if let Ok(result) = place_block(world, position, player.1.selected_state())
+        && !result.report.is_empty()
+    {
+        mutations.write(WorldMutationMessage {
+            world_id: session.id.clone(),
+            report: result.report,
+        });
     }
 }
 

@@ -1,4 +1,6 @@
-use crate::domain::{BlockKind, CHUNK_WIDTH, GENERATOR_VERSION, WORLD_HEIGHT};
+use crate::domain::{
+    BlockState, CHUNK_WIDTH, GENERATOR_VERSION, WORLD_HEIGHT, chunk_is_representable,
+};
 use glam::Vec2;
 use std::fmt;
 
@@ -70,12 +72,23 @@ pub fn validate_snapshot(snapshot: &WorldSnapshot) -> Result<(), SnapshotError> 
             "player position must be finite and local x must be inside its chunk".into(),
         ));
     }
-    if !(1..=BlockKind::HOTBAR.len() as u8).contains(&snapshot.player.selected_slot) {
+    if !(1..=BlockState::HOTBAR.len() as u8).contains(&snapshot.player.selected_slot) {
         return Err(SnapshotError("selected hotbar slot is invalid".into()));
+    }
+    if !chunk_is_representable(snapshot.player.chunk_x) {
+        return Err(SnapshotError(
+            "player chunk cannot be represented as global block coordinates".into(),
+        ));
     }
     let chunk_area = (CHUNK_WIDTH * WORLD_HEIGHT) as usize;
     let mut previous = None;
     for chunk in &snapshot.chunks {
+        if !chunk_is_representable(chunk.x) {
+            return Err(SnapshotError(format!(
+                "chunk {} cannot be represented as global block coordinates",
+                chunk.x
+            )));
+        }
         if chunk.blocks.len() != chunk_area {
             return Err(SnapshotError(format!(
                 "chunk {} has {} blocks; expected {chunk_area}",
@@ -86,7 +99,7 @@ pub fn validate_snapshot(snapshot: &WorldSnapshot) -> Result<(), SnapshotError> 
         if chunk
             .blocks
             .iter()
-            .any(|code| *code != 0 && BlockKind::from_code(*code).is_none())
+            .any(|code| *code != 0 && BlockState::from_code(*code).is_none())
         {
             return Err(SnapshotError(format!(
                 "chunk {} contains an invalid block code",

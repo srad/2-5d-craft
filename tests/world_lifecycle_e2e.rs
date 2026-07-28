@@ -1,10 +1,10 @@
-use bevy::prelude::{IVec2, Vec2};
+use bevy::prelude::Vec2;
 use sidecraft::{
     adapters::storage::ScwRepository,
     application::{
-        WorldRepository, WorldState, blank_snapshot, place_tile, remove_tile, validate_snapshot,
+        WorldRepository, WorldState, blank_snapshot, break_block, place_block, validate_snapshot,
     },
-    domain::{BlockKind, DayCycle, LightGrid, spawn_for_seed, surface_height},
+    domain::{BlockState, DayCycle, LightGrid, VoxelPos, spawn_for_seed, surface_height},
 };
 
 #[test]
@@ -20,11 +20,19 @@ fn new_world_edit_save_and_reload_lifecycle() {
     let loaded = repository.load(&id).unwrap();
     assert!(loaded.chunks.is_empty());
 
-    let mut world = WorldState::from_snapshot(&loaded);
-    let surface = IVec2::new(0, surface_height(seed, 0));
-    let placed = surface + IVec2::Y;
-    assert!(!remove_tile(&mut world, surface).is_empty());
-    assert!(place_tile(&mut world, placed, BlockKind::Wood));
+    let mut world = WorldState::from_snapshot(&loaded).state;
+    let surface = VoxelPos::foreground(0, surface_height(seed, 0));
+    let placed = VoxelPos {
+        y: surface.y + 1,
+        ..surface
+    };
+    assert!(!break_block(&mut world, surface).unwrap().report.is_empty());
+    assert!(
+        !place_block(&mut world, placed, BlockState::WOOD)
+            .unwrap()
+            .report
+            .is_empty()
+    );
 
     let mut updated = loaded;
     updated.day_phase = 0.82;
@@ -36,9 +44,9 @@ fn new_world_edit_save_and_reload_lifecycle() {
 
     let reloaded = repository.load(&id).unwrap();
     validate_snapshot(&reloaded).unwrap();
-    let reconstructed = WorldState::from_snapshot(&reloaded);
-    assert_eq!(reconstructed.grid.get(surface), None);
-    assert_eq!(reconstructed.grid.get(placed), Some(BlockKind::Wood));
+    let reconstructed = WorldState::from_snapshot(&reloaded).state;
+    assert_eq!(reconstructed.view().block(surface), None);
+    assert_eq!(reconstructed.view().block(placed), Some(BlockState::WOOD));
     assert_eq!(reloaded.player.selected_slot, 6);
     assert_eq!(
         Vec2::new(reloaded.player.local_x, reloaded.player.y),
@@ -46,8 +54,8 @@ fn new_world_edit_save_and_reload_lifecycle() {
     );
     assert_eq!(reloaded.day_phase, 0.82);
     assert!(
-        LightGrid::calculate(&reconstructed.grid)
-            .visible_at(&reconstructed.grid, placed)
+        LightGrid::calculate(&reconstructed.view())
+            .visible_at(&reconstructed.view(), placed)
             .sky
             > 0
     );

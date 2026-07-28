@@ -21,21 +21,20 @@ impl Default for StreamConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GenerationRequest {
-    pub local_chunk_x: i32,
     pub global_chunk_x: i64,
     pub origin_chunk: i64,
 }
 
 pub fn plan_generation_requests(
-    center: i32,
+    center: i64,
     origin_chunk: i64,
-    loaded: &HashSet<i32>,
-    in_flight: &HashSet<i32>,
+    loaded: &HashSet<i64>,
+    in_flight: &HashSet<i64>,
     config: StreamConfig,
 ) -> Vec<GenerationRequest> {
     let available = config.max_in_flight.saturating_sub(in_flight.len());
     let mut requests = Vec::with_capacity(available);
-    for distance in 0..=config.load_radius {
+    for distance in 0..=i64::from(config.load_radius) {
         for chunk_x in [center + distance, center - distance] {
             if requests.len() == available {
                 return requests;
@@ -44,13 +43,12 @@ pub fn plan_generation_requests(
                 || in_flight.contains(&chunk_x)
                 || requests
                     .iter()
-                    .any(|request: &GenerationRequest| request.local_chunk_x == chunk_x)
+                    .any(|request: &GenerationRequest| request.global_chunk_x == chunk_x)
             {
                 continue;
             }
             requests.push(GenerationRequest {
-                local_chunk_x: chunk_x,
-                global_chunk_x: origin_chunk + i64::from(chunk_x),
+                global_chunk_x: chunk_x,
                 origin_chunk,
             });
         }
@@ -59,13 +57,13 @@ pub fn plan_generation_requests(
 }
 
 pub fn plan_unloads(
-    center: i32,
-    loaded: impl IntoIterator<Item = i32>,
+    center: i64,
+    loaded: impl IntoIterator<Item = i64>,
     config: StreamConfig,
-) -> Vec<i32> {
+) -> Vec<i64> {
     let mut result = loaded
         .into_iter()
-        .filter(|chunk_x| (*chunk_x - center).abs() > config.unload_radius)
+        .filter(|chunk_x| (*chunk_x - center).abs() > i64::from(config.unload_radius))
         .collect::<Vec<_>>();
     result.sort_unstable();
     result
@@ -74,14 +72,14 @@ pub fn plan_unloads(
 pub fn result_is_still_requested(
     result_origin: i64,
     current_origin: i64,
-    chunk_x: i32,
-    center: i32,
+    chunk_x: i64,
+    center: i64,
     already_loaded: bool,
     config: StreamConfig,
 ) -> bool {
     result_origin == current_origin
         && !already_loaded
-        && (chunk_x - center).abs() <= config.load_radius
+        && (chunk_x - center).abs() <= i64::from(config.load_radius)
 }
 
 #[cfg(test)]
@@ -100,7 +98,7 @@ mod tests {
         assert_eq!(
             requests
                 .iter()
-                .map(|request| request.local_chunk_x)
+                .map(|request| request.global_chunk_x)
                 .collect::<Vec<_>>(),
             vec![0, 1, -1, 2]
         );

@@ -64,7 +64,7 @@ fn save_when_paused(
     mut requests: MessageWriter<SaveRequest>,
 ) {
     if let (Some(world), Some(session)) = (world, session)
-        && world.revision != session.saved_revision
+        && world.revision() != session.saved_revision
     {
         requests.write(SaveRequest(SaveDestination::Background));
     }
@@ -81,7 +81,7 @@ fn autosave(
         return;
     }
     if let (Some(world), Some(session)) = (world, session)
-        && world.revision != session.saved_revision
+        && world.revision() != session.saved_revision
     {
         requests.write(SaveRequest(SaveDestination::Background));
     }
@@ -99,7 +99,7 @@ fn handle_close_request(
         return;
     }
     if let (Some(world), Some(session)) = (world, session)
-        && world.revision != session.saved_revision
+        && world.revision() != session.saved_revision
     {
         save_requests.write(SaveRequest(SaveDestination::Exit));
         next_state.set(AppState::Saving);
@@ -130,13 +130,13 @@ fn handle_save_requests(
         return;
     };
     if destination == SaveDestination::Background
-        && world.revision == session.saved_revision
+        && world.revision() == session.saved_revision
         && coordinator.ticket().is_none()
     {
         finish_destination(destination, &mut next_state, &mut exits);
         return;
     }
-    let decision = coordinator.request(session.id.clone(), world.revision, destination);
+    let decision = coordinator.request(session.id.clone(), world.revision(), destination);
     if let SaveDecision::Start(ticket) = decision
         && let Err(error) = start_save(
             &mut commands,
@@ -148,7 +148,7 @@ fn handle_save_requests(
             &ticket,
         )
     {
-        coordinator.complete(SaveCompletion::Failed, world.revision);
+        coordinator.complete(SaveCompletion::Failed, world.revision());
         status.0 = format!("Save failed: {error}");
         if destination != SaveDestination::Background {
             next_state.set(AppState::Paused);
@@ -178,7 +178,7 @@ fn poll_save_job(
     };
     let revision = job.revision;
     commands.remove_resource::<SaveJob>();
-    let current_revision = world.as_ref().map_or(revision, |world| world.revision);
+    let current_revision = world.as_ref().map_or(revision, |world| world.revision());
     let completion = if result.is_ok() {
         if let Some(session) = session.as_mut() {
             session.saved_revision = session.saved_revision.max(revision);

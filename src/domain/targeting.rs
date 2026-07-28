@@ -1,4 +1,4 @@
-use crate::domain::BlockGrid;
+use crate::domain::{CHUNK_WIDTH, WorldView};
 use glam::{IVec2, Vec2, Vec3};
 
 const REACH: f32 = 5.0;
@@ -13,10 +13,16 @@ pub fn target_from_ray(
     origin: Vec3,
     direction: Vec3,
     player: Vec2,
-    grid: &BlockGrid,
+    view: &WorldView<'_>,
+    origin_chunk: i64,
 ) -> BlockTarget {
     let mut nearest = None;
-    for (coordinate, _) in grid.iter() {
+    let origin_x = origin_chunk * i64::from(CHUNK_WIDTH);
+    for (position, _) in view.iter() {
+        let Ok(local_x) = i32::try_from(position.global_x - origin_x) else {
+            continue;
+        };
+        let coordinate = IVec2::new(local_x, position.y);
         let center = coordinate.as_vec2() + Vec2::splat(0.5);
         if center.distance(player) > REACH + 1.0 {
             continue;
@@ -127,19 +133,22 @@ pub fn tile_overlaps_player(tile: IVec2, player_center: Vec2) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{BlockChunk, BlockKind, CHUNK_WIDTH, WORLD_HEIGHT};
+    use crate::domain::{
+        BlockChunk, BlockGrid, BlockState, CHUNK_WIDTH, WORLD_HEIGHT, WorldMutator,
+    };
 
     #[test]
     fn targeting_hits_only_loaded_playable_blocks() {
         let mut grid = BlockGrid::new(WORLD_HEIGHT);
         let mut blocks = vec![0; (CHUNK_WIDTH * WORLD_HEIGHT) as usize];
-        blocks[(3 * CHUNK_WIDTH + 3) as usize] = BlockKind::Stone.code();
-        grid.insert_chunk(BlockChunk::from_dense(0, blocks).unwrap());
+        blocks[(3 * CHUNK_WIDTH + 3) as usize] = BlockState::STONE.code();
+        WorldMutator::new(&mut grid).integrate_chunk(BlockChunk::from_dense(0, blocks).unwrap());
         let target = target_from_ray(
             Vec3::new(3.5, 3.5, 10.0),
             Vec3::NEG_Z,
             Vec2::new(3.5, 2.0),
-            &grid,
+            &grid.view(),
+            0,
         );
         assert_eq!(target.block, Some(IVec2::new(3, 3)));
     }

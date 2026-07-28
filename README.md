@@ -125,10 +125,14 @@ src/
 ```
 
 `WorldState` owns authoritative resident chunks, global persisted chunk
-identity, and revision tracking. Bevy's `WorldPresentation` owns only scene and
-derived-state dirtiness. `WorldRepository` isolates logical world identity from
-filesystem paths, while `SaveCoordinator` serializes and escalates save intent.
-Menus emit session commands; they do not load or save worlds directly.
+identity, and revision tracking. All block changes pass through
+`WorldMutator`, which atomically commits proposals and reports effective cell
+and chunk changes. The application records persistence dirtiness from those
+reports; Bevy coalesces independent render, lighting, collision, and simulation
+dirty sets before rebuilding derived state. `WorldPresentation` owns only scene
+entities. `WorldRepository` isolates logical world identity from filesystem
+paths, while `SaveCoordinator` serializes and escalates save intent. Menus emit
+session commands; they do not load or save worlds directly.
 
 The dependency direction, mutation boundary, simulation contract, threading
 rules, SCW schema policy, and module-boundary rules are defined in
@@ -147,9 +151,10 @@ git diff --check
 
 The test suite has three levels:
 
-- Unit tests in every gameplay module cover block definitions, generation,
-  persistence validation, lighting, controller math/ECS behavior, targeting,
-  pixel assets, camera behavior, and menu button semantics.
+- Unit tests in every gameplay module cover block definitions, atomic world
+  mutations, derived-state dispatch, generation, persistence validation,
+  lighting, controller math/ECS behavior, targeting, pixel assets, camera
+  behavior, and menu button semantics.
 - `tests/world_lighting_integration.rs` verifies that world reconstruction
   preserves the complete lighting field.
 - `tests/parallel_chunk_generation.rs` generates positive and negative chunks

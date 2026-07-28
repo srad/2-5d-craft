@@ -21,12 +21,11 @@ caves, water, plants, and technology progression of
 ## Resume here
 
 - Active item: none
-- Next item: M1.2 — establish the sole mutation boundary and derived-state
-  dispatch
+- Next item: M1.3 — add one local PowerShell quality-gate command
 - Blocker: none
-- Last completed milestone: M1.1 — boundaries and legacy deletion
-- Verification baseline: confirmed 2026-07-28; formatting, Clippy with warnings
-  denied, 46 automated tests, the release build, and a real-GPU rendered smoke
+- Last completed milestone: M1.2 — mutation and derived state
+- Verification baseline: confirmed 2026-07-29; formatting, Clippy with warnings
+  denied, 53 automated tests, the release build, and a real-GPU rendered smoke
   passed locally
 
 At the start of a work session, mark exactly one item `[~]`. At the end, change
@@ -87,17 +86,17 @@ from code inspection alone.
 - `[x]` Delete other unused APIs and old representations found during the
   boundary refactor; do not add wrappers or aliases.
 
-### M1.2 Mutation and derived state
+### M1.2 Mutation and derived state `[x]`
 
-- `[ ]` Introduce `VoxelPos`, `VoxelLayer`, `BlockState`, and read-only
+- `[x]` Introduce `VoxelPos`, `VoxelLayer`, `BlockState`, and read-only
   `WorldView` domain types.
-- `[ ]` Make `WorldMutator` the sole write boundary for player, generation,
+- `[x]` Make `WorldMutator` the sole write boundary for player, generation,
   loading, simulation, and debug changes.
-- `[ ]` Add atomic multi-cell proposals with preconditions and deterministic
+- `[x]` Add atomic multi-cell proposals with preconditions and deterministic
   conflict resolution.
-- `[ ]` Dispatch one mutation report into independent render, lighting,
+- `[x]` Dispatch one mutation report into independent render, lighting,
   collision, persistence, and simulation dirty sets.
-- `[ ]` Coalesce all derived rebuilds to once per chunk/layer per frame.
+- `[x]` Coalesce all derived rebuilds to once per chunk/layer per frame.
 
 ### M1.3 Local quality gate
 

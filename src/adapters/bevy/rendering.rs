@@ -1,7 +1,7 @@
 use crate::adapters::bevy::world::WorldEntity;
 use crate::domain::{
-    BlockGrid, BlockKind, CHUNK_WIDTH, DEPTH_SLICES, DayCycle, LightGrid, WORLD_HEIGHT,
-    generated_voxel, stable_hash, surface_height_at_depth, world_to_chunk,
+    BlockState, CHUNK_WIDTH, ChunkLayer, DEPTH_SLICES, DayCycle, LightGrid, VoxelPos, WORLD_HEIGHT,
+    WorldView, generated_voxel, stable_hash, surface_height_at_depth, world_to_chunk,
 };
 use avian2d::prelude::*;
 use bevy::asset::RenderAssetUsages;
@@ -14,7 +14,7 @@ const ATLAS_VARIANTS: u32 = 3;
 const FACE_VARIANTS: u32 = 3;
 const GUTTER: u32 = 2;
 const ATLAS_CELL: u32 = TEXTURE_SIZE + GUTTER * 2;
-const ATLAS_TILES: u32 = BlockKind::ALL.len() as u32 * ATLAS_VARIANTS * FACE_VARIANTS;
+const ATLAS_TILES: u32 = BlockState::ALL.len() as u32 * ATLAS_VARIANTS * FACE_VARIANTS;
 
 #[derive(Resource)]
 pub struct RenderCatalog {
@@ -185,8 +185,7 @@ pub struct ChunkMeshes {
 }
 
 pub fn build_chunk_meshes(
-    grid: &BlockGrid,
-    chunk_x: i32,
+    view: &WorldView<'_>,
     global_chunk_x: i64,
     seed: u64,
     light: &LightGrid,
@@ -195,55 +194,54 @@ pub fn build_chunk_meshes(
     let mut opaque = VoxelMeshBuilder::default();
     let mut cutout = VoxelMeshBuilder::default();
     let mut emissive = VoxelMeshBuilder::default();
-    let local_start_x = chunk_x * CHUNK_WIDTH;
-    let global_origin_x = (global_chunk_x - i64::from(chunk_x)) * i64::from(CHUNK_WIDTH);
-
-    let voxel_at = |local_x: i32, y: i32, depth: i32| -> Option<BlockKind> {
+    let voxel_at = |global_x: i64, y: i32, depth: i32| -> Option<BlockState> {
         if !(0..WORLD_HEIGHT).contains(&y) || !(0..i32::from(DEPTH_SLICES)).contains(&depth) {
             return None;
         }
-        let global_x = global_origin_x + i64::from(local_x);
-        if depth == 0 && grid.contains_chunk(world_to_chunk(local_x)) {
-            grid.get(IVec2::new(local_x, y))
+        if depth == 0 && view.contains_chunk(ChunkLayer::foreground(world_to_chunk(global_x))) {
+            view.block(VoxelPos::foreground(global_x, y))
         } else {
             generated_voxel(seed, global_x, y, depth as u8)
         }
     };
 
     for local_x in 0..CHUNK_WIDTH {
-        let world_x = local_start_x + local_x;
         let global_x = global_chunk_x * i64::from(CHUNK_WIDTH) + i64::from(local_x);
         for y in 0..WORLD_HEIGHT {
             for depth in 0..DEPTH_SLICES {
-                let Some(kind) = voxel_at(world_x, y, i32::from(depth)) else {
+                let Some(state) = voxel_at(global_x, y, i32::from(depth)) else {
                     continue;
                 };
-                let variant = (stable_hash(seed, global_x, y, kind as u64 + u64::from(depth) * 97)
-                    % 3) as u32;
-                if kind == BlockKind::Torch {
+                let variant = (stable_hash(
+                    seed,
+                    global_x,
+                    y,
+                    u64::from(state.id().value()) + u64::from(depth) * 97,
+                ) % 3) as u32;
+                if state == BlockState::TORCH {
                     if depth == 0 {
                         emissive.push_torch(local_x as f32, y as f32, variant);
                     }
                     continue;
                 }
-                let builder = if kind == BlockKind::Leaves {
+                let builder = if state == BlockState::LEAVES {
                     &mut cutout
                 } else {
                     &mut opaque
                 };
                 for face in Face::ALL {
                     let (dx, dy, dd) = face.neighbor();
-                    if voxel_at(world_x + dx, y + dy, i32::from(depth) + dd)
-                        .is_some_and(|neighbor| neighbor != BlockKind::Torch)
+                    if voxel_at(global_x + i64::from(dx), y + dy, i32::from(depth) + dd)
+                        .is_some_and(|neighbor| neighbor != BlockState::TORCH)
                     {
                         continue;
                     }
                     let color = face_color(
-                        grid,
+                        view,
                         light,
                         day,
                         global_x,
-                        IVec2::new(world_x, y),
+                        VoxelPos::foreground(global_x, y),
                         depth,
                         face,
                         seed,
@@ -252,7 +250,7 @@ pub fn build_chunk_meshes(
                         local_x as f32,
                         y as f32,
                         depth,
-                        kind,
+                        state,
                         variant,
                         face,
                         color,
@@ -271,18 +269,18 @@ pub fn build_chunk_meshes(
 
 #[allow(clippy::too_many_arguments)]
 fn face_color(
-    grid: &BlockGrid,
+    view: &WorldView<'_>,
     light: &LightGrid,
     day: &DayCycle,
     global_x: i64,
-    coordinate: IVec2,
+    position: VoxelPos,
     depth: u8,
     face: Face,
     seed: u64,
 ) -> [f32; 4] {
     let daylight = day.daylight();
     let (level, torch) = if depth == 0 {
-        let visible = light.visible_at(grid, coordinate);
+        let visible = light.visible_at(view, position);
         (
             f32::from(
                 visible
@@ -295,11 +293,7 @@ fn face_color(
         )
     } else {
         let surface = surface_height_at_depth(seed, global_x, depth);
-        let exposure = if coordinate.y >= surface - 4 {
-            1.0
-        } else {
-            0.42
-        };
+        let exposure = if position.y >= surface - 4 { 1.0 } else { 0.42 };
         (daylight * exposure, 0.0)
     };
     let depth_factor = 1.0 - f32::from(depth) * 0.075;
@@ -313,16 +307,16 @@ fn face_color(
     ]
 }
 
-pub fn build_chunk_collider(grid: &BlockGrid, chunk_x: i32) -> Option<Collider> {
-    let start_x = chunk_x * CHUNK_WIDTH;
+pub fn build_chunk_collider(view: &WorldView<'_>, chunk_x: i64) -> Option<Collider> {
+    let start_x = chunk_x * i64::from(CHUNK_WIDTH);
     let mut shapes = Vec::new();
     for y in 0..WORLD_HEIGHT {
         let mut run_start = None;
         for local_x in 0..=CHUNK_WIDTH {
             let solid = local_x < CHUNK_WIDTH
-                && grid
-                    .get(IVec2::new(start_x + local_x, y))
-                    .is_some_and(|kind| kind.def().solid);
+                && view
+                    .block(VoxelPos::foreground(start_x + i64::from(local_x), y))
+                    .is_some_and(|state| state.def().solid);
             match (run_start, solid) {
                 (None, true) => run_start = Some(local_x),
                 (Some(start), false) => {
@@ -357,7 +351,7 @@ impl VoxelMeshBuilder {
         x: f32,
         y: f32,
         depth: u8,
-        kind: BlockKind,
+        state: BlockState,
         variant: u32,
         face: Face,
         color: [f32; 4],
@@ -402,12 +396,16 @@ impl VoxelMeshBuilder {
                 [x, y, front],
             ],
         };
-        let tile = (kind as u32 * FACE_VARIANTS + face.texture_class()) * ATLAS_VARIANTS + variant;
+        let tile = ((u32::from(state.id().value()) - 1) * FACE_VARIANTS + face.texture_class())
+            * ATLAS_VARIANTS
+            + variant;
         self.push_quad(corners, face.normal(), tile_uvs(tile), color);
     }
 
     fn push_torch(&mut self, x: f32, y: f32, variant: u32) {
-        let tile = (BlockKind::Torch as u32 * FACE_VARIANTS) * ATLAS_VARIANTS + variant;
+        let tile = ((u32::from(BlockState::TORCH.id().value()) - 1) * FACE_VARIANTS)
+            * ATLAS_VARIANTS
+            + variant;
         let uvs = tile_uvs(tile);
         let color = [1.0; 4];
         self.push_quad(
@@ -476,14 +474,14 @@ fn tile_uvs(tile: u32) -> [[f32; 2]; 4] {
 fn atlas_image() -> Image {
     let width = ATLAS_TILES * ATLAS_CELL;
     let mut pixels = vec![0; (width * ATLAS_CELL * 4) as usize];
-    for (kind_index, kind) in BlockKind::ALL.into_iter().enumerate() {
+    for (state_index, state) in BlockState::ALL.into_iter().enumerate() {
         for face in 0..FACE_VARIANTS {
             for variant in 0..ATLAS_VARIANTS {
-                let tile = (kind_index as u32 * FACE_VARIANTS + face) * ATLAS_VARIANTS + variant;
-                let source = if kind == BlockKind::Torch {
+                let tile = (state_index as u32 * FACE_VARIANTS + face) * ATLAS_VARIANTS + variant;
+                let source = if state == BlockState::TORCH {
                     torch_pixels()
                 } else {
-                    block_face_pixels(kind, variant as u8, face)
+                    block_face_pixels(state, variant as u8, face)
                 };
                 for cell_y in 0..ATLAS_CELL {
                     let source_y = cell_y.saturating_sub(GUTTER).min(TEXTURE_SIZE - 1);
@@ -512,27 +510,28 @@ fn atlas_image() -> Image {
     )
 }
 
-fn palette(kind: BlockKind) -> ([u8; 3], [u8; 3]) {
-    match kind {
-        BlockKind::Grass => ([86, 142, 48], [45, 92, 32]),
-        BlockKind::Dirt => ([128, 83, 48], [82, 48, 29]),
-        BlockKind::Stone => ([110, 114, 119], [66, 70, 76]),
-        BlockKind::CoalOre => ([93, 96, 101], [22, 24, 29]),
-        BlockKind::IronOre => ([112, 104, 94], [197, 124, 78]),
-        BlockKind::Wood => ([137, 88, 40], [72, 43, 22]),
-        BlockKind::Leaves => ([54, 132, 52], [25, 76, 35]),
-        BlockKind::Bedrock => ([55, 58, 64], [20, 22, 27]),
-        BlockKind::Torch => ([224, 126, 28], [255, 221, 91]),
+fn palette(state: BlockState) -> ([u8; 3], [u8; 3]) {
+    match state {
+        BlockState::GRASS => ([86, 142, 48], [45, 92, 32]),
+        BlockState::DIRT => ([128, 83, 48], [82, 48, 29]),
+        BlockState::STONE => ([110, 114, 119], [66, 70, 76]),
+        BlockState::COAL_ORE => ([93, 96, 101], [22, 24, 29]),
+        BlockState::IRON_ORE => ([112, 104, 94], [197, 124, 78]),
+        BlockState::WOOD => ([137, 88, 40], [72, 43, 22]),
+        BlockState::LEAVES => ([54, 132, 52], [25, 76, 35]),
+        BlockState::BEDROCK => ([55, 58, 64], [20, 22, 27]),
+        BlockState::TORCH => ([224, 126, 28], [255, 221, 91]),
+        _ => unreachable!("all valid block states have a palette"),
     }
 }
 
 #[cfg(test)]
-pub fn block_pixels(kind: BlockKind, variant: u8) -> Vec<u8> {
-    block_face_pixels(kind, variant, 0)
+pub fn block_pixels(state: BlockState, variant: u8) -> Vec<u8> {
+    block_face_pixels(state, variant, 0)
 }
 
-fn block_face_pixels(kind: BlockKind, variant: u8, face: u32) -> Vec<u8> {
-    let (base, accent) = palette(kind);
+fn block_face_pixels(state: BlockState, variant: u8, face: u32) -> Vec<u8> {
+    let (base, accent) = palette(state);
     let mut pixels = Vec::with_capacity((TEXTURE_SIZE * TEXTURE_SIZE * 4) as usize);
     for y in 0..TEXTURE_SIZE {
         for x in 0..TEXTURE_SIZE {
@@ -540,12 +539,12 @@ fn block_face_pixels(kind: BlockKind, variant: u8, face: u32) -> Vec<u8> {
                 u64::from(variant) + u64::from(face) * 131,
                 i64::from(x),
                 y as i32,
-                kind as u64 + 700,
+                u64::from(state.id().value()) + 700,
             );
             let edge = x == 0 || y == 0 || x == TEXTURE_SIZE - 1 || y == TEXTURE_SIZE - 1;
-            let grass_blade = kind == BlockKind::Grass
+            let grass_blade = state == BlockState::GRASS
                 && ((face == 1 && hash % 7 < 3) || (face != 1 && y < 6 && hash % 5 < 3));
-            let wood_grain = kind == BlockKind::Wood
+            let wood_grain = state == BlockState::WOOD
                 && if face == 1 {
                     ((x as i32 - 16).pow(2) + (y as i32 - 16).pow(2)) % 17 < 4
                 } else {
@@ -557,7 +556,7 @@ fn block_face_pixels(kind: BlockKind, variant: u8, face: u32) -> Vec<u8> {
             for channel in &mut color {
                 *channel = (i16::from(*channel) + variation).clamp(0, 255) as u8;
             }
-            let alpha = if kind == BlockKind::Leaves && hash.is_multiple_of(19) {
+            let alpha = if state == BlockState::LEAVES && hash.is_multiple_of(19) {
                 0
             } else {
                 255
@@ -599,11 +598,14 @@ fn set_pixel(pixels: &mut [u8], x: u32, y: u32, color: [u8; 4]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::BlockChunk;
+    use crate::domain::{
+        BlockChunk, BlockGrid, BlockPrecondition, BlockWrite, MutationPriority, MutationProposal,
+        WorldMutator,
+    };
 
     fn empty_grid() -> BlockGrid {
         let mut grid = BlockGrid::new(WORLD_HEIGHT);
-        grid.insert_chunk(
+        WorldMutator::new(&mut grid).integrate_chunk(
             BlockChunk::from_dense(0, vec![0; (CHUNK_WIDTH * WORLD_HEIGHT) as usize]).unwrap(),
         );
         grid
@@ -611,14 +613,14 @@ mod tests {
 
     #[test]
     fn generated_texture_tiles_are_deterministic_and_detailed() {
-        assert_eq!(block_pixels(BlockKind::Dirt, 1).len(), 32 * 32 * 4);
+        assert_eq!(block_pixels(BlockState::DIRT, 1).len(), 32 * 32 * 4);
         assert_eq!(
-            block_pixels(BlockKind::Dirt, 1),
-            block_pixels(BlockKind::Dirt, 1)
+            block_pixels(BlockState::DIRT, 1),
+            block_pixels(BlockState::DIRT, 1)
         );
         assert_ne!(
-            block_pixels(BlockKind::Dirt, 1),
-            block_pixels(BlockKind::Dirt, 2)
+            block_pixels(BlockState::DIRT, 1),
+            block_pixels(BlockState::DIRT, 2)
         );
         let alphas: Vec<_> = torch_pixels().iter().skip(3).step_by(4).copied().collect();
         assert!(alphas.contains(&0));
@@ -629,7 +631,7 @@ mod tests {
     fn a_single_voxel_emits_six_faces() {
         let mut builder = VoxelMeshBuilder::default();
         for face in Face::ALL {
-            builder.push_voxel_face(0.0, 0.0, 0, BlockKind::Stone, 0, face, [1.0; 4]);
+            builder.push_voxel_face(0.0, 0.0, 0, BlockState::STONE, 0, face, [1.0; 4]);
         }
         let mesh = builder.finish();
         assert_eq!(mesh.count_vertices(), 24);
@@ -639,11 +641,31 @@ mod tests {
     #[test]
     fn chunk_mesh_contains_real_depth_and_keeps_collider_two_dimensional() {
         let mut grid = empty_grid();
-        grid.set(IVec2::new(0, 0), BlockKind::Bedrock);
-        grid.set(IVec2::new(1, 1), BlockKind::Leaves);
-        grid.set(IVec2::new(2, 1), BlockKind::Torch);
-        let light = LightGrid::calculate(&grid);
-        let built = build_chunk_meshes(&grid, 0, 0, 7, &light, &DayCycle::default());
+        let writes = [
+            (VoxelPos::foreground(0, 0), BlockState::BEDROCK),
+            (VoxelPos::foreground(1, 1), BlockState::LEAVES),
+            (VoxelPos::foreground(2, 1), BlockState::TORCH),
+        ];
+        let proposals = writes
+            .into_iter()
+            .enumerate()
+            .map(|(sequence, (position, state))| MutationProposal {
+                preconditions: vec![BlockPrecondition {
+                    position,
+                    expected: None,
+                }],
+                writes: vec![BlockWrite {
+                    position,
+                    state: Some(state),
+                }],
+                priority: MutationPriority::PLAYER,
+                source: position,
+                sequence: sequence as u64,
+            })
+            .collect();
+        WorldMutator::new(&mut grid).commit_batch(proposals);
+        let light = LightGrid::calculate(&grid.view());
+        let built = build_chunk_meshes(&grid.view(), 0, 7, &light, &DayCycle::default());
         let positions = built
             .opaque
             .attribute(Mesh::ATTRIBUTE_POSITION)
@@ -653,6 +675,6 @@ mod tests {
         assert!(positions.iter().any(|position| position[2] <= -2.5));
         assert!(built.cutout.count_vertices() > 0);
         assert!(built.emissive.count_vertices() > 0);
-        assert!(build_chunk_collider(&grid, 0).is_some());
+        assert!(build_chunk_collider(&grid.view(), 0).is_some());
     }
 }

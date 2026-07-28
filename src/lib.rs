@@ -34,6 +34,7 @@ impl Plugin for GamePlugin {
                     RuntimeSet::CompletedWork,
                     RuntimeSet::WorldMaintenance,
                     RuntimeSet::Commands,
+                    RuntimeSet::MutationDispatch,
                     RuntimeSet::Derived,
                     RuntimeSet::Persistence,
                 )

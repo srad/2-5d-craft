@@ -148,12 +148,15 @@ Mutations use atomic proposals:
 struct MutationProposal {
     preconditions: Vec<BlockPrecondition>,
     writes: Vec<BlockWrite>,
-    scheduled_ticks: Vec<ScheduledTickRequest>,
-    priority: RulePriority,
+    priority: MutationPriority,
     source: VoxelPos,
     sequence: u64,
 }
 ```
+
+M3 extends accepted proposals with scheduled tick requests once the logical
+clock and persisted queue exist; M1.2 proposals contain only atomic block
+writes.
 
 - A proposal is accepted or rejected as a unit. A two-cell sand movement can
   never apply only its source or destination write.
@@ -167,9 +170,10 @@ struct MutationProposal {
   `MutationReport`.
 
 The report is dispatched into separate dirty sets for rendering, lighting,
-collision, persistence, and simulation-neighbor scheduling. Each adapter owns
-and drains its dirty set. A chunk/layer is rebuilt at most once per rendered
-frame regardless of how many cells changed.
+collision, persistence, and simulation-neighbor scheduling. The application
+owns persistence dirtiness; Bevy owns the remaining derived sets. Each owner
+drains its set, and a chunk/layer is rebuilt at most once per rendered frame
+regardless of how many cells changed.
 
 ## Simulation
 

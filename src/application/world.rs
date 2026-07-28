@@ -1,82 +1,124 @@
 use crate::application::{ChunkSnapshot, PlayerSnapshot, WorldSession, WorldSnapshot};
 use crate::domain::{
-    BlockChunk, BlockGrid, BlockKind, WORLD_HEIGHT, generate_chunk_at, world_to_chunk,
+    BlockChunk, BlockGrid, BlockPrecondition, BlockState, BlockWrite, MutationBatchResult,
+    MutationPriority, MutationProposal, MutationReport, VoxelCell, VoxelPos, WORLD_HEIGHT,
+    WorldMutator, WorldView, generate_chunk_at, world_to_chunk,
 };
-use glam::IVec2;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug)]
 pub struct WorldState {
-    pub grid: BlockGrid,
+    grid: BlockGrid,
     persisted_chunks: BTreeMap<i64, Vec<u8>>,
-    dirty_loaded_chunks: HashSet<i32>,
-    pub origin_chunk: i64,
-    pub revision: u64,
-    pub seed: u64,
+    dirty_chunks: BTreeSet<i64>,
+    origin_chunk: i64,
+    revision: u64,
+    seed: u64,
+}
+
+#[derive(Debug)]
+pub struct InitializedWorld {
+    pub state: WorldState,
+    pub report: MutationReport,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorldCommandError {
+    Unavailable,
+    Occupied,
+    Unsupported,
+    Unbreakable,
 }
 
 impl WorldState {
-    pub fn from_snapshot(snapshot: &WorldSnapshot) -> Self {
+    pub fn from_snapshot(snapshot: &WorldSnapshot) -> InitializedWorld {
         let persisted_chunks = snapshot
             .chunks
             .iter()
             .map(|chunk| (chunk.x, chunk.blocks.clone()))
             .collect::<BTreeMap<_, _>>();
-        let requested = glam::Vec2::new(snapshot.player.local_x, snapshot.player.y);
-        let center_chunk = world_to_chunk(requested.x.floor() as i32);
+        let center_local_chunk = world_to_chunk(snapshot.player.local_x.floor() as i64);
         let origin_chunk = snapshot.player.chunk_x;
-        let global_chunk = origin_chunk + i64::from(center_chunk);
+        let global_chunk = origin_chunk + center_local_chunk;
         let initial = persisted_chunks
             .get(&global_chunk)
             .cloned()
-            .and_then(|blocks| BlockChunk::from_dense(center_chunk, blocks))
-            .unwrap_or_else(|| generate_chunk_at(snapshot.seed, global_chunk, center_chunk));
+            .and_then(|blocks| BlockChunk::from_dense(global_chunk, blocks))
+            .unwrap_or_else(|| generate_chunk_at(snapshot.seed, global_chunk));
         let mut grid = BlockGrid::new(WORLD_HEIGHT);
-        grid.insert_chunk(initial);
-        Self {
-            grid,
-            persisted_chunks,
-            dirty_loaded_chunks: HashSet::new(),
-            origin_chunk,
-            revision: 0,
-            seed: snapshot.seed,
+        let report = WorldMutator::new(&mut grid).integrate_chunk(initial);
+        InitializedWorld {
+            state: Self {
+                grid,
+                persisted_chunks,
+                dirty_chunks: BTreeSet::new(),
+                origin_chunk,
+                revision: 0,
+                seed: snapshot.seed,
+            },
+            report,
         }
+    }
+
+    pub fn view(&self) -> WorldView<'_> {
+        self.grid.view()
+    }
+
+    pub fn origin_chunk(&self) -> i64 {
+        self.origin_chunk
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn seed(&self) -> u64 {
+        self.seed
     }
 
     pub fn persisted_blocks(&self, global_chunk_x: i64) -> Option<Vec<u8>> {
         self.persisted_chunks.get(&global_chunk_x).cloned()
     }
 
-    pub fn integrate_chunk(&mut self, chunk: BlockChunk) {
-        self.grid.insert_chunk(chunk);
+    pub fn integrate_chunk(&mut self, chunk: BlockChunk) -> MutationReport {
+        WorldMutator::new(&mut self.grid).integrate_chunk(chunk)
     }
 
-    pub fn unload_chunk(&mut self, chunk_x: i32) {
-        if let Some(chunk) = self.grid.remove_chunk(chunk_x)
-            && self.dirty_loaded_chunks.remove(&chunk_x)
+    pub fn unload_chunk(&mut self, chunk_x: i64) -> MutationReport {
+        let (removed, report) = WorldMutator::new(&mut self.grid).unload_chunk(chunk_x);
+        if let Some(chunk) = removed
+            && self.dirty_chunks.remove(&chunk_x)
         {
-            self.persisted_chunks.insert(
-                self.origin_chunk + i64::from(chunk_x),
-                chunk.blocks().to_vec(),
-            );
+            self.persisted_chunks
+                .insert(chunk_x, chunk.blocks().to_vec());
         }
+        report
     }
 
     pub fn rebase(&mut self, delta_chunks: i32) {
-        self.grid.rebase(delta_chunks);
-        self.dirty_loaded_chunks = self
-            .dirty_loaded_chunks
-            .drain()
-            .map(|chunk_x| chunk_x - delta_chunks)
-            .collect();
         self.origin_chunk += i64::from(delta_chunks);
+    }
+
+    pub fn commit_batch(&mut self, proposals: Vec<MutationProposal>) -> MutationBatchResult {
+        let result = WorldMutator::new(&mut self.grid).commit_batch(proposals);
+        if !result.report.cell_changes.is_empty() {
+            self.dirty_chunks.extend(
+                result
+                    .report
+                    .cell_changes
+                    .iter()
+                    .map(|change| world_to_chunk(change.position.global_x)),
+            );
+            self.revision = self.revision.wrapping_add(1);
+        }
+        result
     }
 
     pub fn snapshot_chunks(&self) -> Vec<ChunkSnapshot> {
         let mut chunks = self.persisted_chunks.clone();
-        for chunk_x in &self.dirty_loaded_chunks {
+        for chunk_x in &self.dirty_chunks {
             if let Some(blocks) = self.grid.chunk_snapshot(*chunk_x) {
-                chunks.insert(self.origin_chunk + i64::from(*chunk_x), blocks);
+                chunks.insert(*chunk_x, blocks);
             }
         }
         chunks
@@ -95,7 +137,7 @@ impl WorldState {
     ) -> WorldSnapshot {
         WorldSnapshot {
             generator_version: session.generator_version,
-            height: self.grid.height(),
+            height: self.view().height(),
             name: session.name.clone(),
             seed: session.seed,
             created_at_unix_s: session.created_at_unix_s,
@@ -115,77 +157,123 @@ impl WorldState {
         }
     }
 
-    fn mark_changed(&mut self, coordinate: IVec2) {
-        self.dirty_loaded_chunks
-            .insert(world_to_chunk(coordinate.x));
-        self.revision = self.revision.wrapping_add(1);
+    pub fn local_to_voxel(&self, coordinate: glam::IVec2) -> VoxelPos {
+        VoxelPos::foreground(
+            self.origin_chunk * i64::from(crate::domain::CHUNK_WIDTH) + i64::from(coordinate.x),
+            coordinate.y,
+        )
     }
 }
 
-pub fn remove_tile(world: &mut WorldState, coordinate: IVec2) -> Vec<(IVec2, BlockKind)> {
-    let mut removed = Vec::new();
-    if let Some(kind) = world.grid.remove(coordinate) {
-        removed.push((coordinate, kind));
-        let above = coordinate + IVec2::Y;
-        if world.grid.get(above) == Some(BlockKind::Torch) {
-            world.grid.remove(above);
-            removed.push((above, BlockKind::Torch));
-        }
-        world.mark_changed(coordinate);
+pub fn place_block(
+    world: &mut WorldState,
+    position: VoxelPos,
+    state: BlockState,
+) -> Result<MutationBatchResult, WorldCommandError> {
+    if world.view().cell(position) != VoxelCell::Air {
+        return Err(match world.view().cell(position) {
+            VoxelCell::Block(_) => WorldCommandError::Occupied,
+            _ => WorldCommandError::Unavailable,
+        });
     }
-    removed
-}
-
-pub fn place_tile(world: &mut WorldState, coordinate: IVec2, kind: BlockKind) -> bool {
-    if !world.grid.in_bounds(coordinate)
-        || !world.grid.contains_chunk(world_to_chunk(coordinate.x))
-        || world.grid.get(coordinate).is_some()
-    {
-        return false;
-    }
-    if kind == BlockKind::Torch
+    if state == BlockState::TORCH
         && !world
-            .grid
-            .get(coordinate - IVec2::Y)
+            .view()
+            .block(VoxelPos {
+                y: position.y - 1,
+                ..position
+            })
             .is_some_and(|support| support.def().solid)
     {
-        return false;
+        return Err(WorldCommandError::Unsupported);
     }
-    world.grid.set(coordinate, kind);
-    world.mark_changed(coordinate);
-    true
+    Ok(world.commit_batch(vec![MutationProposal {
+        preconditions: vec![BlockPrecondition {
+            position,
+            expected: None,
+        }],
+        writes: vec![BlockWrite {
+            position,
+            state: Some(state),
+        }],
+        priority: MutationPriority::PLAYER,
+        source: position,
+        sequence: 0,
+    }]))
+}
+
+pub fn break_block(
+    world: &mut WorldState,
+    position: VoxelPos,
+) -> Result<MutationBatchResult, WorldCommandError> {
+    let Some(state) = world.view().block(position) else {
+        return Err(WorldCommandError::Unavailable);
+    };
+    if !state.breakable() {
+        return Err(WorldCommandError::Unbreakable);
+    }
+    let above = VoxelPos {
+        y: position.y + 1,
+        ..position
+    };
+    let unsupported_torch = world.view().block(above) == Some(BlockState::TORCH);
+    let mut preconditions = vec![BlockPrecondition {
+        position,
+        expected: Some(state),
+    }];
+    let mut writes = vec![BlockWrite {
+        position,
+        state: None,
+    }];
+    if unsupported_torch {
+        preconditions.push(BlockPrecondition {
+            position: above,
+            expected: Some(BlockState::TORCH),
+        });
+        writes.push(BlockWrite {
+            position: above,
+            state: None,
+        });
+    }
+    Ok(world.commit_batch(vec![MutationProposal {
+        preconditions,
+        writes,
+        priority: MutationPriority::PLAYER,
+        source: position,
+        sequence: 0,
+    }]))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::application::{WorldId, blank_snapshot};
-    use crate::domain::{BlockKind, spawn_for_seed};
+    use crate::domain::{BlockState, spawn_for_seed};
 
-    #[test]
-    fn rebasing_preserves_global_dirty_chunk_identity() {
-        let mut world = WorldState::from_snapshot(&blank_snapshot(
+    fn world() -> WorldState {
+        WorldState::from_snapshot(&blank_snapshot(
             11,
             "Test".into(),
             vec![],
             spawn_for_seed(11),
             1,
-        ));
-        let coordinate = IVec2::new(0, 70);
-        assert!(place_tile(&mut world, coordinate, BlockKind::Dirt));
+        ))
+        .state
+    }
+
+    #[test]
+    fn rebasing_preserves_global_dirty_chunk_identity() {
+        let mut world = world();
+        let position = VoxelPos::foreground(0, 70);
+        place_block(&mut world, position, BlockState::DIRT).unwrap();
         world.rebase(8);
         assert_eq!(world.snapshot_chunks()[0].x, 0);
+        assert_eq!(world.view().block(position), Some(BlockState::DIRT));
     }
 
     #[test]
     fn snapshot_converts_local_player_position_to_global_chunk_identity() {
-        let mut world = WorldState::from_snapshot(&blank_snapshot(
-            11,
-            "Test".into(),
-            vec![],
-            spawn_for_seed(11),
-            1,
-        ));
+        let mut world = world();
         world.rebase(8);
         let session = WorldSession {
             id: WorldId::new("test").unwrap(),
@@ -201,5 +289,16 @@ mod tests {
         assert_eq!(snapshot.player.selected_slot, 3);
         assert_eq!(snapshot.day_phase, 0.75);
         assert_eq!(snapshot.last_played_unix_s, 9);
+    }
+
+    #[test]
+    fn failed_command_does_not_increment_revision() {
+        let mut world = world();
+        let position = VoxelPos::foreground(0, 0);
+        assert_eq!(
+            break_block(&mut world, position),
+            Err(WorldCommandError::Unbreakable)
+        );
+        assert_eq!(world.revision(), 0);
     }
 }

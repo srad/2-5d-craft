@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use avian2d::prelude::{Collider, RigidBody};
 use bevy::{
@@ -16,10 +16,13 @@ use crate::{
         rendering::{RenderCatalog, build_chunk_collider, build_chunk_meshes},
     },
     application::{
-        StreamConfig, WorldSession, WorldState, plan_generation_requests, plan_unloads,
+        StreamConfig, WorldId, WorldSession, WorldState, plan_generation_requests, plan_unloads,
         result_is_still_requested,
     },
-    domain::{BlockChunk, CHUNK_WIDTH, LightGrid, generate_chunk_at, world_to_chunk},
+    domain::{
+        BlockChunk, CHUNK_WIDTH, ChunkChange, ChunkLayer, LightGrid, MutationReport, VoxelLayer,
+        VoxelPos, generate_chunk_at, world_to_chunk,
+    },
 };
 
 const REBASE_THRESHOLD_CHUNKS: i32 = 8;
@@ -28,7 +31,7 @@ const REBASE_THRESHOLD_CHUNKS: i32 = 8;
 pub struct WorldEntity;
 
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ChunkCoordinate(pub i32);
+pub struct ChunkCoordinate(pub i64);
 
 struct ChunkScene {
     root: Entity,
@@ -42,9 +45,21 @@ struct ChunkRenderLayer {
 
 #[derive(Resource, Default)]
 pub(crate) struct WorldPresentation {
-    chunk_scenes: HashMap<i32, ChunkScene>,
-    render_dirty: HashSet<i32>,
-    lighting_dirty: bool,
+    chunk_scenes: HashMap<i64, ChunkScene>,
+}
+
+#[derive(Resource, Default)]
+struct WorldDirtySets {
+    render: BTreeSet<ChunkLayer>,
+    lighting: BTreeSet<ChunkLayer>,
+    collision: BTreeSet<ChunkLayer>,
+    simulation: BTreeSet<VoxelPos>,
+}
+
+#[derive(Message, Debug, Clone)]
+pub(crate) struct WorldMutationMessage {
+    pub(crate) world_id: WorldId,
+    pub(crate) report: MutationReport,
 }
 
 #[derive(Resource, Default)]
@@ -55,7 +70,7 @@ struct RetiredMeshAssets {
 
 #[derive(Component)]
 struct ChunkGenerationTask {
-    chunk_x: i32,
+    chunk_x: i64,
     origin_chunk: i64,
     task: Task<BlockChunk>,
 }
@@ -63,7 +78,7 @@ struct ChunkGenerationTask {
 type RebaseEntityQuery<'w, 's> = Query<
     'w,
     's,
-    (&'static mut Transform, Option<&'static mut ChunkCoordinate>),
+    &'static mut Transform,
     (With<WorldEntity>, Without<Player>, Without<GameCamera>),
 >;
 
@@ -71,7 +86,8 @@ pub struct WorldPlugin;
 
 impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<RetiredMeshAssets>()
+        app.add_message::<WorldMutationMessage>()
+            .init_resource::<RetiredMeshAssets>()
             .add_systems(OnEnter(AppState::LoadingWorld), spawn_pending_world)
             .add_systems(
                 Update,
@@ -96,6 +112,10 @@ impl Plugin for WorldPlugin {
             )
             .add_systems(
                 Update,
+                dispatch_mutation_reports.in_set(RuntimeSet::MutationDispatch),
+            )
+            .add_systems(
+                Update,
                 refresh_lighting
                     .in_set(RuntimeSet::Derived)
                     .run_if(in_state(AppState::Playing)),
@@ -105,7 +125,7 @@ impl Plugin for WorldPlugin {
                 refresh_chunk_scenes.run_if(in_state(AppState::Playing)),
             )
             .add_systems(OnEnter(AppState::MainMenu), cleanup_world)
-            .add_systems(Last, age_retired_meshes);
+            .add_systems(Last, (clear_simulation_dirty, age_retired_meshes).chain());
     }
 }
 
@@ -113,17 +133,18 @@ fn spawn_pending_world(
     mut commands: Commands,
     pending: Option<Res<PendingWorldResource>>,
     mut day: ResMut<DayCycleResource>,
+    mut mutations: MessageWriter<WorldMutationMessage>,
 ) {
     let Some(pending) = pending else {
         return;
     };
     day.phase = pending.snapshot.day_phase;
     day.previous_light_level = day.light_level();
-    let world = WorldState::from_snapshot(&pending.snapshot);
-    let mut presentation = WorldPresentation::default();
-    presentation.render_dirty.extend(world.grid.loaded_chunks());
-    commands.insert_resource(LightGridResource(LightGrid::calculate(&world.grid)));
-    commands.insert_resource(WorldStateResource(world));
+    let initialized = WorldState::from_snapshot(&pending.snapshot);
+    commands.insert_resource(LightGridResource(LightGrid::calculate(
+        &initialized.state.view(),
+    )));
+    commands.insert_resource(WorldStateResource(initialized.state));
     commands.insert_resource(WorldSessionResource(WorldSession {
         id: pending.id.clone(),
         name: pending.snapshot.name.clone(),
@@ -132,7 +153,12 @@ fn spawn_pending_world(
         created_at_unix_s: pending.snapshot.created_at_unix_s,
         saved_revision: 0,
     }));
-    commands.insert_resource(presentation);
+    commands.insert_resource(WorldPresentation::default());
+    commands.insert_resource(WorldDirtySets::default());
+    mutations.write(WorldMutationMessage {
+        world_id: pending.id.clone(),
+        report: initialized.report,
+    });
 }
 
 fn finish_loading_world(
@@ -149,44 +175,29 @@ fn finish_loading_world(
 fn rebase_world(
     mut commands: Commands,
     mut world: Option<ResMut<WorldStateResource>>,
-    mut presentation: Option<ResMut<WorldPresentation>>,
     player: Option<Single<(&mut Transform, &mut RespawnPoint), With<Player>>>,
     mut entities: RebaseEntityQuery,
     tasks: Query<Entity, With<ChunkGenerationTask>>,
     mut camera: Single<&mut Transform, (With<GameCamera>, Without<Player>)>,
     mut camera_rig: ResMut<CameraRig>,
 ) {
-    let (Some(world), Some(presentation), Some(mut player)) =
-        (world.as_mut(), presentation.as_mut(), player)
-    else {
+    let (Some(world), Some(mut player)) = (world.as_mut(), player) else {
         return;
     };
-    let delta_chunks = world_to_chunk(player.0.translation.x.floor() as i32);
+    let delta_chunks = (player.0.translation.x.floor() as i32).div_euclid(CHUNK_WIDTH);
     if delta_chunks.abs() < REBASE_THRESHOLD_CHUNKS {
         return;
     }
     let offset = (delta_chunks * CHUNK_WIDTH) as f32;
     player.0.translation.x -= offset;
     player.1.0.x -= offset;
-    for (mut transform, chunk) in &mut entities {
+    for mut transform in &mut entities {
         transform.translation.x -= offset;
-        if let Some(mut chunk) = chunk {
-            chunk.0 -= delta_chunks;
-        }
     }
     for entity in &tasks {
         commands.entity(entity).despawn();
     }
     world.rebase(delta_chunks);
-    presentation.chunk_scenes = std::mem::take(&mut presentation.chunk_scenes)
-        .into_iter()
-        .map(|(chunk_x, scene)| (chunk_x - delta_chunks, scene))
-        .collect();
-    presentation.render_dirty = std::mem::take(&mut presentation.render_dirty)
-        .into_iter()
-        .map(|chunk_x| chunk_x - delta_chunks)
-        .collect();
-    presentation.lighting_dirty = true;
     center_camera(
         player.0.translation.truncate(),
         &mut camera,
@@ -203,32 +214,30 @@ fn request_chunk_generation(
     let (Some(world), Some(player)) = (world, player) else {
         return;
     };
-    let loaded = world.grid.loaded_chunks().collect::<HashSet<_>>();
+    let loaded = world.view().loaded_chunks().collect::<HashSet<_>>();
     let in_flight = tasks
         .iter()
-        .filter(|task| task.origin_chunk == world.origin_chunk)
+        .filter(|task| task.origin_chunk == world.origin_chunk())
         .map(|task| task.chunk_x)
         .collect::<HashSet<_>>();
-    let center = world_to_chunk(player.translation.x.floor() as i32);
+    let center = world.origin_chunk() + world_to_chunk(player.translation.x.floor() as i64);
     let pool = AsyncComputeTaskPool::get();
     for request in plan_generation_requests(
         center,
-        world.origin_chunk,
+        world.origin_chunk(),
         &loaded,
         &in_flight,
         StreamConfig::default(),
     ) {
-        let seed = world.seed;
+        let seed = world.seed();
         let persisted = world.persisted_blocks(request.global_chunk_x);
         let task = pool.spawn(async move {
             persisted
-                .and_then(|blocks| BlockChunk::from_dense(request.local_chunk_x, blocks))
-                .unwrap_or_else(|| {
-                    generate_chunk_at(seed, request.global_chunk_x, request.local_chunk_x)
-                })
+                .and_then(|blocks| BlockChunk::from_dense(request.global_chunk_x, blocks))
+                .unwrap_or_else(|| generate_chunk_at(seed, request.global_chunk_x))
         });
         commands.spawn(ChunkGenerationTask {
-            chunk_x: request.local_chunk_x,
+            chunk_x: request.global_chunk_x,
             origin_chunk: request.origin_chunk,
             task,
         });
@@ -238,16 +247,15 @@ fn request_chunk_generation(
 fn integrate_generated_chunks(
     mut commands: Commands,
     mut world: Option<ResMut<WorldStateResource>>,
-    mut presentation: Option<ResMut<WorldPresentation>>,
+    session: Option<Res<WorldSessionResource>>,
     player: Option<Single<&Transform, With<Player>>>,
     mut tasks: Query<(Entity, &mut ChunkGenerationTask)>,
+    mut mutations: MessageWriter<WorldMutationMessage>,
 ) {
-    let (Some(world), Some(presentation), Some(player)) =
-        (world.as_mut(), presentation.as_mut(), player)
-    else {
+    let (Some(world), Some(session), Some(player)) = (world.as_mut(), session, player) else {
         return;
     };
-    let center = world_to_chunk(player.translation.x.floor() as i32);
+    let center = world.origin_chunk() + world_to_chunk(player.translation.x.floor() as i64);
     let config = StreamConfig::default();
     let mut integrated = 0;
     for (entity, mut generation) in &mut tasks {
@@ -260,56 +268,147 @@ fn integrate_generated_chunks(
         commands.entity(entity).despawn();
         if !result_is_still_requested(
             generation.origin_chunk,
-            world.origin_chunk,
+            world.origin_chunk(),
             chunk.x(),
             center,
-            world.grid.contains_chunk(chunk.x()),
+            world
+                .view()
+                .contains_chunk(ChunkLayer::foreground(chunk.x())),
             config,
         ) {
             continue;
         }
-        let chunk_x = chunk.x();
-        world.integrate_chunk(chunk);
-        presentation.render_dirty.insert(chunk_x);
-        presentation.lighting_dirty = true;
+        let report = world.integrate_chunk(chunk);
+        mutations.write(WorldMutationMessage {
+            world_id: session.id.clone(),
+            report,
+        });
         integrated += 1;
     }
 }
 
 fn unload_distant_chunks(
-    mut commands: Commands,
     mut world: Option<ResMut<WorldStateResource>>,
-    mut presentation: Option<ResMut<WorldPresentation>>,
+    session: Option<Res<WorldSessionResource>>,
     player: Option<Single<&Transform, With<Player>>>,
-    mut retired: ResMut<RetiredMeshAssets>,
+    mut mutations: MessageWriter<WorldMutationMessage>,
 ) {
-    let (Some(world), Some(presentation), Some(player)) =
-        (world.as_mut(), presentation.as_mut(), player)
-    else {
+    let (Some(world), Some(session), Some(player)) = (world.as_mut(), session, player) else {
         return;
     };
-    let center = world_to_chunk(player.translation.x.floor() as i32);
-    let unload = plan_unloads(center, world.grid.loaded_chunks(), StreamConfig::default());
+    let center = world.origin_chunk() + world_to_chunk(player.translation.x.floor() as i64);
+    let unload = plan_unloads(
+        center,
+        world.view().loaded_chunks(),
+        StreamConfig::default(),
+    );
     for chunk_x in unload {
-        world.unload_chunk(chunk_x);
-        despawn_chunk_entities(&mut commands, presentation, &mut retired, chunk_x);
-        presentation.lighting_dirty = true;
+        let report = world.unload_chunk(chunk_x);
+        if !report.is_empty() {
+            mutations.write(WorldMutationMessage {
+                world_id: session.id.clone(),
+                report,
+            });
+        }
     }
+}
+
+fn dispatch_mutation_reports(
+    session: Option<Res<WorldSessionResource>>,
+    mut dirty: Option<ResMut<WorldDirtySets>>,
+    mut mutations: MessageReader<WorldMutationMessage>,
+) {
+    let (Some(session), Some(dirty)) = (session, dirty.as_mut()) else {
+        return;
+    };
+    for mutation in mutations.read() {
+        if mutation.world_id != session.id {
+            continue;
+        }
+        apply_report_to_dirty(&mutation.report, dirty);
+    }
+}
+
+fn apply_report_to_dirty(report: &MutationReport, dirty: &mut WorldDirtySets) {
+    for change in &report.cell_changes {
+        let chunk = ChunkLayer {
+            chunk_x: world_to_chunk(change.position.global_x),
+            layer: change.position.layer,
+        };
+        dirty.render.insert(chunk);
+        dirty.lighting.insert(chunk);
+        if change.position.layer == VoxelLayer::Foreground {
+            dirty.collision.insert(chunk);
+        }
+        let local_x = change.position.global_x.rem_euclid(i64::from(CHUNK_WIDTH));
+        if local_x == 0 {
+            dirty.render.insert(ChunkLayer {
+                chunk_x: chunk.chunk_x - 1,
+                ..chunk
+            });
+        } else if local_x == i64::from(CHUNK_WIDTH - 1) {
+            dirty.render.insert(ChunkLayer {
+                chunk_x: chunk.chunk_x + 1,
+                ..chunk
+            });
+        }
+        for position in mutation_neighbors(change.position) {
+            dirty.simulation.insert(position);
+        }
+    }
+    for change in &report.chunk_changes {
+        let chunk = match change {
+            ChunkChange::Integrated(chunk) | ChunkChange::Unloaded(chunk) => *chunk,
+        };
+        dirty.render.insert(chunk);
+        dirty.lighting.insert(chunk);
+        if chunk.layer == VoxelLayer::Foreground {
+            dirty.collision.insert(chunk);
+        }
+        dirty.render.insert(ChunkLayer {
+            chunk_x: chunk.chunk_x - 1,
+            ..chunk
+        });
+        dirty.render.insert(ChunkLayer {
+            chunk_x: chunk.chunk_x + 1,
+            ..chunk
+        });
+    }
+}
+
+fn mutation_neighbors(position: VoxelPos) -> [VoxelPos; 5] {
+    [
+        position,
+        VoxelPos {
+            global_x: position.global_x - 1,
+            ..position
+        },
+        VoxelPos {
+            global_x: position.global_x + 1,
+            ..position
+        },
+        VoxelPos {
+            y: position.y - 1,
+            ..position
+        },
+        VoxelPos {
+            y: position.y + 1,
+            ..position
+        },
+    ]
 }
 
 fn refresh_lighting(
     mut light: Option<ResMut<LightGridResource>>,
     world: Option<Res<WorldStateResource>>,
-    mut presentation: Option<ResMut<WorldPresentation>>,
+    mut dirty: Option<ResMut<WorldDirtySets>>,
 ) {
-    let (Some(light), Some(world), Some(presentation)) =
-        (light.as_mut(), world, presentation.as_mut())
-    else {
+    let (Some(light), Some(world), Some(dirty)) = (light.as_mut(), world, dirty.as_mut()) else {
         return;
     };
-    if presentation.lighting_dirty {
-        light.0 = LightGrid::calculate(&world.grid);
-        presentation.lighting_dirty = false;
+    if !dirty.lighting.is_empty() {
+        light.0 = LightGrid::calculate(&world.view());
+        dirty.lighting.clear();
     }
 }
 
@@ -323,30 +422,97 @@ fn refresh_chunk_scenes(
     mut retired: ResMut<RetiredMeshAssets>,
     world: Option<Res<WorldStateResource>>,
     mut presentation: Option<ResMut<WorldPresentation>>,
+    mut dirty: Option<ResMut<WorldDirtySets>>,
 ) {
-    let (Some(catalog), Some(light), Some(world), Some(presentation)) =
-        (catalog, light, world, presentation.as_mut())
+    let (Some(catalog), Some(light), Some(world), Some(presentation), Some(dirty)) =
+        (catalog, light, world, presentation.as_mut(), dirty.as_mut())
     else {
         return;
     };
-    let mut chunks = presentation
-        .render_dirty
-        .drain()
-        .filter(|chunk_x| world.grid.contains_chunk(*chunk_x))
-        .collect::<Vec<_>>();
-    chunks.sort_unstable();
-    for chunk_x in chunks {
-        let rebuilt = build_chunk_meshes(
-            &world.grid,
-            chunk_x,
-            world.origin_chunk + i64::from(chunk_x),
-            world.seed,
-            &light,
-            &day,
-        );
-        let collider = build_chunk_collider(&world.grid, chunk_x);
-        let transform = Transform::from_xyz((chunk_x * CHUNK_WIDTH) as f32, 0.0, 0.0);
-        if let Some(scene) = presentation.chunk_scenes.get_mut(&chunk_x) {
+    let work = dirty
+        .render
+        .iter()
+        .chain(dirty.collision.iter())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    for chunk in work {
+        let rebuild_render = dirty.render.contains(&chunk);
+        let rebuild_collision = dirty.collision.contains(&chunk);
+        if chunk.layer != VoxelLayer::Foreground {
+            continue;
+        }
+        if !world.view().contains_chunk(chunk) {
+            despawn_chunk_entities(&mut commands, presentation, &mut retired, chunk.chunk_x);
+            continue;
+        }
+        let local_chunk = chunk.chunk_x - world.origin_chunk();
+        let Ok(local_chunk) = i32::try_from(local_chunk) else {
+            continue;
+        };
+        let transform = Transform::from_xyz((local_chunk * CHUNK_WIDTH) as f32, 0.0, 0.0);
+        let is_new = !presentation.chunk_scenes.contains_key(&chunk.chunk_x);
+        let rebuilt = (rebuild_render || is_new)
+            .then(|| build_chunk_meshes(&world.view(), chunk.chunk_x, world.seed(), &light, &day));
+        let collider = (rebuild_collision || is_new)
+            .then(|| build_chunk_collider(&world.view(), chunk.chunk_x));
+        if let Some(scene) = presentation.chunk_scenes.get_mut(&chunk.chunk_x) {
+            if let Some(rebuilt) = rebuilt {
+                update_chunk_layer(
+                    &mut commands,
+                    &mut meshes,
+                    &mut retired,
+                    &mut scene.layers[0],
+                    rebuilt.opaque,
+                    &catalog.opaque_material,
+                    transform,
+                    chunk.chunk_x,
+                );
+                update_chunk_layer(
+                    &mut commands,
+                    &mut meshes,
+                    &mut retired,
+                    &mut scene.layers[1],
+                    rebuilt.cutout,
+                    &catalog.cutout_material,
+                    transform,
+                    chunk.chunk_x,
+                );
+                update_chunk_layer(
+                    &mut commands,
+                    &mut meshes,
+                    &mut retired,
+                    &mut scene.layers[2],
+                    rebuilt.emissive,
+                    &catalog.emissive_material,
+                    transform,
+                    chunk.chunk_x,
+                );
+            }
+            if let Some(collider) = collider {
+                if let Some(collider) = collider {
+                    commands.entity(scene.root).insert(collider);
+                } else {
+                    commands.entity(scene.root).remove::<Collider>();
+                }
+            }
+            continue;
+        }
+        let root = commands
+            .spawn((
+                transform,
+                RigidBody::Static,
+                ChunkCoordinate(chunk.chunk_x),
+                WorldEntity,
+            ))
+            .id();
+        if let Some(Some(collider)) = collider {
+            commands.entity(root).insert(collider);
+        }
+        let mut scene = ChunkScene {
+            root,
+            layers: [None, None, None],
+        };
+        if let Some(rebuilt) = rebuilt {
             update_chunk_layer(
                 &mut commands,
                 &mut meshes,
@@ -355,7 +521,7 @@ fn refresh_chunk_scenes(
                 rebuilt.opaque,
                 &catalog.opaque_material,
                 transform,
-                chunk_x,
+                chunk.chunk_x,
             );
             update_chunk_layer(
                 &mut commands,
@@ -365,7 +531,7 @@ fn refresh_chunk_scenes(
                 rebuilt.cutout,
                 &catalog.cutout_material,
                 transform,
-                chunk_x,
+                chunk.chunk_x,
             );
             update_chunk_layer(
                 &mut commands,
@@ -375,62 +541,13 @@ fn refresh_chunk_scenes(
                 rebuilt.emissive,
                 &catalog.emissive_material,
                 transform,
-                chunk_x,
+                chunk.chunk_x,
             );
-            if let Some(collider) = collider {
-                commands.entity(scene.root).insert(collider);
-            } else {
-                commands.entity(scene.root).remove::<Collider>();
-            }
-            continue;
         }
-        let root = commands
-            .spawn((
-                transform,
-                RigidBody::Static,
-                ChunkCoordinate(chunk_x),
-                WorldEntity,
-            ))
-            .id();
-        if let Some(collider) = collider {
-            commands.entity(root).insert(collider);
-        }
-        let mut scene = ChunkScene {
-            root,
-            layers: [None, None, None],
-        };
-        update_chunk_layer(
-            &mut commands,
-            &mut meshes,
-            &mut retired,
-            &mut scene.layers[0],
-            rebuilt.opaque,
-            &catalog.opaque_material,
-            transform,
-            chunk_x,
-        );
-        update_chunk_layer(
-            &mut commands,
-            &mut meshes,
-            &mut retired,
-            &mut scene.layers[1],
-            rebuilt.cutout,
-            &catalog.cutout_material,
-            transform,
-            chunk_x,
-        );
-        update_chunk_layer(
-            &mut commands,
-            &mut meshes,
-            &mut retired,
-            &mut scene.layers[2],
-            rebuilt.emissive,
-            &catalog.emissive_material,
-            transform,
-            chunk_x,
-        );
-        presentation.chunk_scenes.insert(chunk_x, scene);
+        presentation.chunk_scenes.insert(chunk.chunk_x, scene);
     }
+    dirty.render.clear();
+    dirty.collision.clear();
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -442,7 +559,7 @@ fn update_chunk_layer(
     mesh: Mesh,
     material: &Handle<StandardMaterial>,
     transform: Transform,
-    chunk_x: i32,
+    chunk_x: i64,
 ) {
     if mesh.count_vertices() == 0 {
         if let Some(previous) = layer.take() {
@@ -473,23 +590,11 @@ fn update_chunk_layer(
     }
 }
 
-pub(crate) fn mark_world_visuals_dirty(presentation: &mut WorldPresentation, world_x: i32) {
-    let chunk_x = world_to_chunk(world_x);
-    presentation.render_dirty.insert(chunk_x);
-    let local_x = world_x.rem_euclid(CHUNK_WIDTH);
-    if local_x == 0 {
-        presentation.render_dirty.insert(chunk_x - 1);
-    } else if local_x == CHUNK_WIDTH - 1 {
-        presentation.render_dirty.insert(chunk_x + 1);
-    }
-    presentation.lighting_dirty = true;
-}
-
 fn despawn_chunk_entities(
     commands: &mut Commands,
     presentation: &mut WorldPresentation,
     retired: &mut RetiredMeshAssets,
-    chunk_x: i32,
+    chunk_x: i64,
 ) {
     if let Some(scene) = presentation.chunk_scenes.remove(&chunk_x) {
         commands.entity(scene.root).despawn();
@@ -498,7 +603,12 @@ fn despawn_chunk_entities(
             retired.pending.push(layer.mesh);
         }
     }
-    presentation.render_dirty.remove(&chunk_x);
+}
+
+fn clear_simulation_dirty(mut dirty: Option<ResMut<WorldDirtySets>>) {
+    if let Some(dirty) = dirty.as_mut() {
+        dirty.simulation.clear();
+    }
 }
 
 fn cleanup_world(
@@ -528,6 +638,7 @@ fn cleanup_world(
     commands.remove_resource::<WorldStateResource>();
     commands.remove_resource::<WorldSessionResource>();
     commands.remove_resource::<WorldPresentation>();
+    commands.remove_resource::<WorldDirtySets>();
     commands.remove_resource::<LightGridResource>();
     commands.remove_resource::<PendingWorldResource>();
 }
@@ -537,5 +648,65 @@ fn age_retired_meshes(mut retired: ResMut<RetiredMeshAssets>) {
     retired.generations.push_back(pending);
     while retired.generations.len() > 16 {
         retired.generations.pop_front();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{BlockState, CellChange};
+
+    #[test]
+    fn cell_reports_coalesce_and_only_cross_the_edited_edge() {
+        let position = VoxelPos::foreground(0, 70);
+        let report = MutationReport {
+            cell_changes: vec![
+                CellChange {
+                    position,
+                    before: None,
+                    after: Some(BlockState::DIRT),
+                },
+                CellChange {
+                    position,
+                    before: Some(BlockState::DIRT),
+                    after: Some(BlockState::STONE),
+                },
+            ],
+            chunk_changes: Vec::new(),
+        };
+        let mut dirty = WorldDirtySets::default();
+
+        apply_report_to_dirty(&report, &mut dirty);
+
+        assert_eq!(
+            dirty.render,
+            BTreeSet::from([ChunkLayer::foreground(-1), ChunkLayer::foreground(0),])
+        );
+        assert_eq!(dirty.lighting, BTreeSet::from([ChunkLayer::foreground(0)]));
+        assert_eq!(dirty.collision, BTreeSet::from([ChunkLayer::foreground(0)]));
+        assert_eq!(dirty.simulation.len(), 5);
+    }
+
+    #[test]
+    fn chunk_lifecycle_reports_invalidate_both_render_neighbors() {
+        let report = MutationReport {
+            cell_changes: Vec::new(),
+            chunk_changes: vec![ChunkChange::Integrated(ChunkLayer::foreground(4))],
+        };
+        let mut dirty = WorldDirtySets::default();
+
+        apply_report_to_dirty(&report, &mut dirty);
+
+        assert_eq!(
+            dirty.render,
+            BTreeSet::from([
+                ChunkLayer::foreground(3),
+                ChunkLayer::foreground(4),
+                ChunkLayer::foreground(5),
+            ])
+        );
+        assert_eq!(dirty.lighting, BTreeSet::from([ChunkLayer::foreground(4)]));
+        assert_eq!(dirty.collision, BTreeSet::from([ChunkLayer::foreground(4)]));
+        assert!(dirty.simulation.is_empty());
     }
 }

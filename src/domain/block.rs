@@ -1,16 +1,10 @@
-use serde::{Deserialize, Serialize};
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct BlockId(u16);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Ord, PartialOrd)]
-pub enum BlockKind {
-    Grass,
-    Dirt,
-    Stone,
-    CoalOre,
-    IronOre,
-    Wood,
-    Leaves,
-    Torch,
-    Bedrock,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct BlockState {
+    id: BlockId,
+    variant: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -22,84 +16,182 @@ pub struct BlockDef {
     pub hotbar_slot: Option<u8>,
 }
 
-impl BlockKind {
+impl BlockId {
+    pub const GRASS: Self = Self(1);
+    pub const DIRT: Self = Self(2);
+    pub const STONE: Self = Self(3);
+    pub const COAL_ORE: Self = Self(4);
+    pub const IRON_ORE: Self = Self(5);
+    pub const WOOD: Self = Self(6);
+    pub const LEAVES: Self = Self(7);
+    pub const TORCH: Self = Self(8);
+    pub const BEDROCK: Self = Self(9);
+
     pub const HOTBAR: [Self; 8] = [
-        Self::Grass,
-        Self::Dirt,
-        Self::Stone,
-        Self::CoalOre,
-        Self::IronOre,
-        Self::Wood,
-        Self::Leaves,
-        Self::Torch,
+        Self::GRASS,
+        Self::DIRT,
+        Self::STONE,
+        Self::COAL_ORE,
+        Self::IRON_ORE,
+        Self::WOOD,
+        Self::LEAVES,
+        Self::TORCH,
     ];
 
     pub const ALL: [Self; 9] = [
-        Self::Grass,
-        Self::Dirt,
-        Self::Stone,
-        Self::CoalOre,
-        Self::IronOre,
-        Self::Wood,
-        Self::Leaves,
-        Self::Torch,
-        Self::Bedrock,
+        Self::GRASS,
+        Self::DIRT,
+        Self::STONE,
+        Self::COAL_ORE,
+        Self::IRON_ORE,
+        Self::WOOD,
+        Self::LEAVES,
+        Self::TORCH,
+        Self::BEDROCK,
     ];
+
+    pub const fn new(value: u16) -> Option<Self> {
+        if value >= Self::GRASS.0 && value <= Self::BEDROCK.0 {
+            Some(Self(value))
+        } else {
+            None
+        }
+    }
+
+    pub const fn value(self) -> u16 {
+        self.0
+    }
 
     pub const fn def(self) -> BlockDef {
         match self {
-            Self::Grass => BlockDef::solid(0.40, 15, Some(1)),
-            Self::Dirt => BlockDef::solid(0.35, 15, Some(2)),
-            Self::Stone => BlockDef::solid(0.80, 15, Some(3)),
-            Self::CoalOre => BlockDef::solid(1.20, 15, Some(4)),
-            Self::IronOre => BlockDef::solid(1.50, 15, Some(5)),
-            Self::Wood => BlockDef::solid(0.80, 15, Some(6)),
-            Self::Leaves => BlockDef::solid(0.20, 2, Some(7)),
-            Self::Torch => BlockDef {
+            Self::GRASS => BlockDef::solid(0.40, 15, Some(1)),
+            Self::DIRT => BlockDef::solid(0.35, 15, Some(2)),
+            Self::STONE => BlockDef::solid(0.80, 15, Some(3)),
+            Self::COAL_ORE => BlockDef::solid(1.20, 15, Some(4)),
+            Self::IRON_ORE => BlockDef::solid(1.50, 15, Some(5)),
+            Self::WOOD => BlockDef::solid(0.80, 15, Some(6)),
+            Self::LEAVES => BlockDef::solid(0.20, 2, Some(7)),
+            Self::TORCH => BlockDef {
                 hardness_seconds: 0.10,
                 solid: false,
                 light_opacity: 0,
                 emitted_light: 12,
                 hotbar_slot: Some(8),
             },
-            Self::Bedrock => BlockDef {
+            Self::BEDROCK => BlockDef {
                 hardness_seconds: f32::INFINITY,
                 solid: true,
                 light_opacity: 15,
                 emitted_light: 0,
                 hotbar_slot: None,
             },
+            _ => panic!("invalid block id"),
         }
     }
 
     pub const fn display_name(self) -> &'static str {
         match self {
-            Self::Grass => "Grass",
-            Self::Dirt => "Dirt",
-            Self::Stone => "Stone",
-            Self::CoalOre => "Coal ore",
-            Self::IronOre => "Iron ore",
-            Self::Wood => "Wood",
-            Self::Leaves => "Leaves",
-            Self::Torch => "Torch",
-            Self::Bedrock => "Bedrock",
+            Self::GRASS => "Grass",
+            Self::DIRT => "Dirt",
+            Self::STONE => "Stone",
+            Self::COAL_ORE => "Coal ore",
+            Self::IRON_ORE => "Iron ore",
+            Self::WOOD => "Wood",
+            Self::LEAVES => "Leaves",
+            Self::TORCH => "Torch",
+            Self::BEDROCK => "Bedrock",
+            _ => panic!("invalid block id"),
         }
     }
 
     pub const fn breakable(self) -> bool {
-        !matches!(self, Self::Bedrock)
+        !matches!(self, Self::BEDROCK)
     }
 
     pub const fn code(self) -> u8 {
-        self as u8 + 1
+        self.0 as u8
     }
 
     pub const fn from_code(code: u8) -> Option<Self> {
-        if code == 0 || code as usize > Self::ALL.len() {
-            None
+        Self::new(code as u16)
+    }
+}
+
+impl BlockState {
+    pub const GRASS: Self = Self::from_id(BlockId::GRASS);
+    pub const DIRT: Self = Self::from_id(BlockId::DIRT);
+    pub const STONE: Self = Self::from_id(BlockId::STONE);
+    pub const COAL_ORE: Self = Self::from_id(BlockId::COAL_ORE);
+    pub const IRON_ORE: Self = Self::from_id(BlockId::IRON_ORE);
+    pub const WOOD: Self = Self::from_id(BlockId::WOOD);
+    pub const LEAVES: Self = Self::from_id(BlockId::LEAVES);
+    pub const TORCH: Self = Self::from_id(BlockId::TORCH);
+    pub const BEDROCK: Self = Self::from_id(BlockId::BEDROCK);
+
+    pub const HOTBAR: [Self; 8] = [
+        Self::GRASS,
+        Self::DIRT,
+        Self::STONE,
+        Self::COAL_ORE,
+        Self::IRON_ORE,
+        Self::WOOD,
+        Self::LEAVES,
+        Self::TORCH,
+    ];
+
+    pub const ALL: [Self; 9] = [
+        Self::GRASS,
+        Self::DIRT,
+        Self::STONE,
+        Self::COAL_ORE,
+        Self::IRON_ORE,
+        Self::WOOD,
+        Self::LEAVES,
+        Self::TORCH,
+        Self::BEDROCK,
+    ];
+
+    pub const fn new(id: BlockId, variant: u8) -> Option<Self> {
+        if variant == 0 {
+            Some(Self { id, variant })
         } else {
-            Some(Self::ALL[code as usize - 1])
+            None
         }
+    }
+
+    pub const fn from_id(id: BlockId) -> Self {
+        Self { id, variant: 0 }
+    }
+
+    pub const fn from_code(code: u8) -> Option<Self> {
+        match BlockId::from_code(code) {
+            Some(id) => Some(Self::from_id(id)),
+            None => None,
+        }
+    }
+
+    pub const fn id(self) -> BlockId {
+        self.id
+    }
+
+    pub const fn variant(self) -> u8 {
+        self.variant
+    }
+
+    pub const fn def(self) -> BlockDef {
+        self.id.def()
+    }
+
+    pub const fn display_name(self) -> &'static str {
+        self.id.display_name()
+    }
+
+    pub const fn breakable(self) -> bool {
+        self.id.breakable()
+    }
+
+    pub const fn code(self) -> u8 {
+        self.id.code()
     }
 }
 
@@ -122,9 +214,9 @@ mod tests {
 
     #[test]
     fn hotbar_slots_are_complete_and_unique() {
-        let slots: HashSet<_> = BlockKind::HOTBAR
+        let slots: HashSet<_> = BlockState::HOTBAR
             .iter()
-            .map(|kind| kind.def().hotbar_slot)
+            .map(|state| state.def().hotbar_slot)
             .collect();
         assert_eq!(slots.len(), 8);
         assert!(slots.contains(&Some(1)));
@@ -133,37 +225,36 @@ mod tests {
 
     #[test]
     fn bedrock_is_the_only_unbreakable_block() {
-        for kind in BlockKind::ALL {
-            assert_eq!(kind.breakable(), kind != BlockKind::Bedrock);
+        for state in BlockState::ALL {
+            assert_eq!(state.breakable(), state != BlockState::BEDROCK);
         }
-        assert!(BlockKind::Bedrock.def().hardness_seconds.is_infinite());
+        assert!(BlockState::BEDROCK.def().hardness_seconds.is_infinite());
     }
 
     #[test]
     fn torch_is_non_solid_and_emissive() {
-        let torch = BlockKind::Torch.def();
+        let torch = BlockState::TORCH.def();
         assert!(!torch.solid);
         assert_eq!(torch.light_opacity, 0);
         assert_eq!(torch.emitted_light, 12);
     }
 
     #[test]
-    fn binary_palette_entries_round_trip() {
-        for kind in BlockKind::ALL {
-            let encoded = postcard::to_allocvec(&kind).unwrap();
-            let (decoded, remaining): (BlockKind, &[u8]) =
-                postcard::take_from_bytes(&encoded).unwrap();
-            assert_eq!(decoded, kind);
-            assert!(remaining.is_empty());
-        }
+    fn block_states_validate_ids_and_variants() {
+        assert_eq!(BlockId::new(1), Some(BlockId::GRASS));
+        assert_eq!(BlockId::new(9), Some(BlockId::BEDROCK));
+        assert_eq!(BlockId::new(0), None);
+        assert_eq!(BlockId::new(10), None);
+        assert_eq!(BlockState::new(BlockId::STONE, 0), Some(BlockState::STONE));
+        assert_eq!(BlockState::new(BlockId::STONE, 1), None);
     }
 
     #[test]
     fn dense_codes_reserve_zero_for_air() {
-        assert_eq!(BlockKind::from_code(0), None);
-        for kind in BlockKind::ALL {
-            assert_eq!(BlockKind::from_code(kind.code()), Some(kind));
+        assert_eq!(BlockState::from_code(0), None);
+        for state in BlockState::ALL {
+            assert_eq!(BlockState::from_code(state.code()), Some(state));
         }
-        assert_eq!(BlockKind::from_code(255), None);
+        assert_eq!(BlockState::from_code(255), None);
     }
 }

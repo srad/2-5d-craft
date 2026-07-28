@@ -20,6 +20,7 @@ pub(crate) enum RuntimeSet {
     CompletedWork,
     WorldMaintenance,
     Commands,
+    MutationDispatch,
     Derived,
     Persistence,
 }
@@ -50,8 +51,7 @@ pub(crate) struct LightGridResource(pub LightGrid);
 
 impl Default for LightGridResource {
     fn default() -> Self {
-        Self(LightGrid::calculate(&crate::domain::BlockGrid::new(
-            crate::domain::WORLD_HEIGHT,
-        )))
+        let grid = crate::domain::BlockGrid::new(crate::domain::WORLD_HEIGHT);
+        Self(LightGrid::calculate(&grid.view()))
     }
 }

@@ -2,7 +2,7 @@ use crate::application::{
     ChunkSnapshot, InvalidWorldEntry, PlayerSnapshot, RepositoryError, SnapshotError, WorldCatalog,
     WorldId, WorldRepository, WorldSnapshot, WorldSummary, validate_snapshot,
 };
-use crate::domain::{BlockKind, CHUNK_WIDTH, WORLD_HEIGHT};
+use crate::domain::{BlockState, CHUNK_WIDTH, WORLD_HEIGHT};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
@@ -40,8 +40,52 @@ struct ScwMetadataV1 {
 #[derive(Debug, Serialize, Deserialize)]
 struct ScwHeaderV1 {
     metadata: ScwMetadataV1,
-    palette: Vec<BlockKind>,
+    palette: Vec<ScwPaletteBlock>,
     chunk_xs: Vec<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+enum ScwPaletteBlock {
+    Grass,
+    Dirt,
+    Stone,
+    CoalOre,
+    IronOre,
+    Wood,
+    Leaves,
+    Torch,
+    Bedrock,
+}
+
+impl ScwPaletteBlock {
+    fn from_code(code: u8) -> Option<Self> {
+        Some(match BlockState::from_code(code)? {
+            BlockState::GRASS => Self::Grass,
+            BlockState::DIRT => Self::Dirt,
+            BlockState::STONE => Self::Stone,
+            BlockState::COAL_ORE => Self::CoalOre,
+            BlockState::IRON_ORE => Self::IronOre,
+            BlockState::WOOD => Self::Wood,
+            BlockState::LEAVES => Self::Leaves,
+            BlockState::TORCH => Self::Torch,
+            BlockState::BEDROCK => Self::Bedrock,
+            _ => return None,
+        })
+    }
+
+    const fn code(self) -> u8 {
+        match self {
+            Self::Grass => BlockState::GRASS.code(),
+            Self::Dirt => BlockState::DIRT.code(),
+            Self::Stone => BlockState::STONE.code(),
+            Self::CoalOre => BlockState::COAL_ORE.code(),
+            Self::IronOre => BlockState::IRON_ORE.code(),
+            Self::Wood => BlockState::WOOD.code(),
+            Self::Leaves => BlockState::LEAVES.code(),
+            Self::Torch => BlockState::TORCH.code(),
+            Self::Bedrock => BlockState::BEDROCK.code(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -530,7 +574,7 @@ fn parts_from_save(save: &WorldSnapshot) -> Result<(ScwHeaderV1, Vec<u8>), Store
         .chunks
         .iter()
         .flat_map(|chunk| chunk.blocks.iter().copied())
-        .filter_map(BlockKind::from_code)
+        .filter_map(ScwPaletteBlock::from_code)
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
@@ -543,7 +587,7 @@ fn parts_from_save(save: &WorldSnapshot) -> Result<(ScwHeaderV1, Vec<u8>), Store
     let mut blocks = Vec::with_capacity(save.chunks.len() * CHUNK_AREA);
     for chunk in &save.chunks {
         for code in &chunk.blocks {
-            let palette_code = match BlockKind::from_code(*code) {
+            let palette_code = match ScwPaletteBlock::from_code(*code) {
                 None if *code == 0 => 0,
                 Some(kind) => {
                     let palette_index = palette
@@ -697,9 +741,9 @@ mod tests {
 
     fn example_save() -> WorldSnapshot {
         let mut blocks = vec![0; CHUNK_AREA];
-        blocks[0] = BlockKind::Bedrock.code();
-        blocks[1] = BlockKind::Bedrock.code();
-        blocks[(2 * CHUNK_WIDTH + 3) as usize] = BlockKind::Torch.code();
+        blocks[0] = BlockState::BEDROCK.code();
+        blocks[1] = BlockState::BEDROCK.code();
+        blocks[(2 * CHUNK_WIDTH + 3) as usize] = BlockState::TORCH.code();
         blank_snapshot(
             7,
             "Example".into(),
@@ -738,7 +782,10 @@ mod tests {
     fn payload_uses_a_dense_byte_array_and_palette() {
         let (header, blocks) = parts_from_save(&example_save()).unwrap();
         assert_eq!(blocks.len(), CHUNK_AREA);
-        assert_eq!(header.palette, vec![BlockKind::Torch, BlockKind::Bedrock]);
+        assert_eq!(
+            header.palette,
+            vec![ScwPaletteBlock::Torch, ScwPaletteBlock::Bedrock]
+        );
         assert_eq!(blocks[0], 2);
         assert_eq!(blocks[(2 * CHUNK_WIDTH + 3) as usize], 1);
     }
@@ -869,5 +916,15 @@ mod tests {
             save_from_metadata(metadata, Vec::new()),
             Err(StoreError::UnsupportedSchema(1))
         ));
+    }
+
+    #[test]
+    fn schema_two_palette_discriminants_remain_stable() {
+        assert_eq!(postcard::to_allocvec(&ScwPaletteBlock::Grass).unwrap(), [0]);
+        assert_eq!(postcard::to_allocvec(&ScwPaletteBlock::Torch).unwrap(), [7]);
+        assert_eq!(
+            postcard::to_allocvec(&ScwPaletteBlock::Bedrock).unwrap(),
+            [8]
+        );
     }
 }

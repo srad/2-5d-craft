@@ -458,7 +458,7 @@ fn update_hotbar(
         });
     }
     for mut label in &mut labels {
-        label.0 = player.selected_kind().display_name().into();
+        label.0 = player.selected_state().display_name().into();
     }
 }
 

@@ -4,7 +4,7 @@ use crate::adapters::bevy::{
     rendering::RenderCatalog,
     world::WorldEntity,
 };
-use crate::{AppState, domain::BlockKind};
+use crate::{AppState, domain::BlockState};
 use avian2d::{math::*, prelude::*};
 use bevy::ecs::query::Has;
 use bevy::prelude::*;
@@ -46,8 +46,8 @@ pub struct Hotbar {
 }
 
 impl Hotbar {
-    pub fn selected_kind(self) -> BlockKind {
-        BlockKind::HOTBAR[usize::from(self.selected_slot.saturating_sub(1)).min(7)]
+    pub fn selected_state(self) -> BlockState {
+        BlockState::HOTBAR[usize::from(self.selected_slot.saturating_sub(1)).min(7)]
     }
 }
 
@@ -109,10 +109,13 @@ fn spawn_player(
         return;
     };
     let requested = Vec2::new(pending.snapshot.player.local_x, pending.snapshot.player.y);
-    let spawn = if world.grid.player_position_is_safe(requested) {
+    let spawn = if world
+        .view()
+        .player_position_is_safe(requested, world.origin_chunk())
+    {
         requested
     } else {
-        world.grid.safe_spawn()
+        world.view().safe_spawn(world.origin_chunk())
     };
     center_camera(spawn, &mut camera, &mut camera_rig);
     let cube = catalog.player_cube.clone();
@@ -393,7 +396,7 @@ mod tests {
             let hotbar = Hotbar {
                 selected_slot: slot,
             };
-            assert_eq!(hotbar.selected_kind().def().hotbar_slot, Some(slot));
+            assert_eq!(hotbar.selected_state().def().hotbar_slot, Some(slot));
         }
     }
 

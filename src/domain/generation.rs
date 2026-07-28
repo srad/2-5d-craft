@@ -1,4 +1,6 @@
-use crate::domain::{BlockChunk, BlockGrid, BlockKind, CHUNK_WIDTH, DEPTH_SLICES, WORLD_HEIGHT};
+use crate::domain::{
+    BlockChunk, BlockGrid, BlockState, CHUNK_WIDTH, DEPTH_SLICES, WORLD_HEIGHT, WorldMutator,
+};
 use glam::Vec2;
 
 pub fn stable_hash(seed: u64, x: i64, y: i32, salt: u64) -> u64 {
@@ -65,7 +67,7 @@ fn tree_root(seed: u64, x: i64, depth: i32) -> bool {
     x.abs() >= 5 && stable_hash_3d(seed, x, 0, depth, 313).is_multiple_of(29)
 }
 
-pub fn generated_voxel(seed: u64, x: i64, y: i32, depth: u8) -> Option<BlockKind> {
+pub fn generated_voxel(seed: u64, x: i64, y: i32, depth: u8) -> Option<BlockState> {
     if !(0..WORLD_HEIGHT).contains(&y) || depth >= DEPTH_SLICES {
         return None;
     }
@@ -82,26 +84,26 @@ pub fn generated_voxel(seed: u64, x: i64, y: i32, depth: u8) -> Option<BlockKind
                 }
                 let root_y = surface_height_at_depth(seed, root_x, root_depth as u8) + 1;
                 if x == root_x && depth_i32 == root_depth && (root_y..root_y + 3).contains(&y) {
-                    return Some(BlockKind::Wood);
+                    return Some(BlockState::WOOD);
                 }
                 let canopy_distance = (x - root_x).abs()
                     + i64::from((depth_i32 - root_depth).abs())
                     + i64::from((y - (root_y + 3)).abs());
                 if canopy_distance <= 3 && (root_y + 2..=root_y + 5).contains(&y) {
-                    return Some(BlockKind::Leaves);
+                    return Some(BlockState::LEAVES);
                 }
             }
         }
         return None;
     }
     if y == 0 {
-        return Some(BlockKind::Bedrock);
+        return Some(BlockState::BEDROCK);
     }
     if y == surface {
-        return Some(BlockKind::Grass);
+        return Some(BlockState::GRASS);
     }
     if y >= surface - 4 {
-        return Some(BlockKind::Dirt);
+        return Some(BlockState::DIRT);
     }
     let cave_cell = stable_hash_3d(seed, x.div_euclid(4), y.div_euclid(4), depth_i32, 401) % 1000;
     if y > 4 && y < surface - 5 && cave_cell < 105 {
@@ -109,19 +111,19 @@ pub fn generated_voxel(seed: u64, x: i64, y: i32, depth: u8) -> Option<BlockKind
     }
     let ore = stable_hash_3d(seed, x, y, depth_i32, 101) % 1000;
     if y < 28 && ore < 18 {
-        Some(BlockKind::IronOre)
+        Some(BlockState::IRON_ORE)
     } else if y < 36 && ore < 55 {
-        Some(BlockKind::CoalOre)
+        Some(BlockState::COAL_ORE)
     } else {
-        Some(BlockKind::Stone)
+        Some(BlockState::STONE)
     }
 }
 
-pub fn generate_chunk(seed: u64, chunk_x: i32) -> BlockChunk {
-    generate_chunk_at(seed, i64::from(chunk_x), chunk_x)
+pub fn generate_chunk(seed: u64, chunk_x: i64) -> BlockChunk {
+    generate_chunk_at(seed, chunk_x)
 }
 
-pub(crate) fn generate_chunk_at(seed: u64, global_chunk_x: i64, local_chunk_x: i32) -> BlockChunk {
+pub(crate) fn generate_chunk_at(seed: u64, global_chunk_x: i64) -> BlockChunk {
     let mut blocks = vec![0; (CHUNK_WIDTH * WORLD_HEIGHT) as usize];
     let start_x = global_chunk_x * i64::from(CHUNK_WIDTH);
     let end_x = start_x + i64::from(CHUNK_WIDTH);
@@ -133,19 +135,19 @@ pub(crate) fn generate_chunk_at(seed: u64, global_chunk_x: i64, local_chunk_x: i
             }
         }
     }
-    BlockChunk::from_dense(local_chunk_x, blocks).expect("generated chunks are valid")
+    BlockChunk::from_dense(global_chunk_x, blocks).expect("generated chunks are valid")
 }
 
 fn generate_world(seed: u64) -> BlockGrid {
     let mut grid = BlockGrid::new(WORLD_HEIGHT);
     for chunk_x in -1..=1 {
-        grid.insert_chunk(generate_chunk(seed, chunk_x));
+        WorldMutator::new(&mut grid).integrate_chunk(generate_chunk(seed, chunk_x));
     }
     grid
 }
 
 pub fn spawn_for_seed(seed: u64) -> Vec2 {
-    generate_world(seed).safe_spawn()
+    generate_world(seed).view().safe_spawn(0)
 }
 
 #[cfg(test)]
@@ -162,9 +164,9 @@ mod tests {
 
     #[test]
     fn generation_remains_deterministic_at_large_global_coordinates() {
-        let left = generate_chunk_at(29, 1_000_000_000_000, 0);
-        let again = generate_chunk_at(29, 1_000_000_000_000, 0);
-        let right = generate_chunk_at(29, 1_000_000_000_001, 1);
+        let left = generate_chunk_at(29, 1_000_000_000_000);
+        let again = generate_chunk_at(29, 1_000_000_000_000);
+        let right = generate_chunk_at(29, 1_000_000_000_001);
         assert_eq!(left, again);
         assert_ne!(left.blocks(), right.blocks());
     }

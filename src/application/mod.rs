@@ -17,4 +17,4 @@ pub use streaming::{
     GenerationRequest, StreamConfig, plan_generation_requests, plan_unloads,
     result_is_still_requested,
 };
-pub use world::{WorldState, place_tile, remove_tile};
+pub use world::{InitializedWorld, WorldCommandError, WorldState, break_block, place_block};
