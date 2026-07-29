@@ -22,7 +22,6 @@ pub(crate) enum SessionCommand {
     SaveAndQuit,
     RetrySave,
     QuitWithoutSaving,
-    Back,
     Quit,
 }
 
@@ -112,7 +111,6 @@ fn handle_session_commands(
             SessionCommand::QuitWithoutSaving | SessionCommand::Quit => {
                 exits.write(AppExit::Success);
             }
-            SessionCommand::Back => next_state.set(AppState::MainMenu),
         }
     }
 }

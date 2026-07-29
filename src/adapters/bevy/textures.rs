@@ -38,6 +38,9 @@ pub(crate) struct TexturePackCatalog {
     custom_root: PathBuf,
 }
 
+#[derive(Resource)]
+pub(crate) struct TexturePackPreview(pub(crate) ResolvedPack);
+
 impl TexturePackCatalog {
     pub(crate) fn active_id(&self) -> &str {
         &self.active.manifest.id
@@ -87,7 +90,9 @@ impl Plugin for TexturePackPlugin {
         let catalog = load_initial_catalog().unwrap_or_else(|error| {
             panic!("built-in texture pack failed to load: {error}");
         });
+        let preview = TexturePackPreview(catalog.active.clone());
         app.insert_resource(catalog)
+            .insert_resource(preview)
             .add_message::<TexturePackChanged>();
     }
 }

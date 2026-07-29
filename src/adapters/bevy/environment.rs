@@ -8,10 +8,11 @@ use bevy::{
 };
 
 use crate::adapters::bevy::{
-    DayCycleResource, RuntimeSet,
+    RuntimeSet,
     camera::GameCamera,
     lighting::LightingPalette,
-    textures::{TexturePackCatalog, TexturePackChanged},
+    showcase::PresentationDay,
+    textures::{TexturePackCatalog, TexturePackChanged, TexturePackPreview},
 };
 use sidecraft_textures::PackImage;
 
@@ -70,7 +71,10 @@ pub(crate) struct EnvironmentPlugin;
 impl Plugin for EnvironmentPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(PostStartup, setup_environment)
-            .add_systems(Update, apply_texture_pack)
+            .add_systems(
+                Update,
+                (apply_texture_pack, apply_texture_pack_preview).chain(),
+            )
             .add_systems(Update, animate_environment.in_set(RuntimeSet::Derived));
     }
 }
@@ -211,6 +215,25 @@ fn apply_texture_pack(
     }
 }
 
+fn apply_texture_pack_preview(
+    preview: Res<TexturePackPreview>,
+    handles: Option<Res<EnvironmentTextures>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    if !preview.is_changed() {
+        return;
+    }
+    let Some(handles) = handles else {
+        return;
+    };
+    replace_image(&mut images, &handles.stars, &preview.0.stars);
+    replace_image(&mut images, &handles.sun, &preview.0.sun);
+    replace_image(&mut images, &handles.cloud, &preview.0.cloud);
+    for (handle, moon) in handles.moons.iter().zip(&preview.0.moons) {
+        replace_image(&mut images, handle, moon);
+    }
+}
+
 fn replace_image(images: &mut Assets<Image>, handle: &Handle<Image>, source: &PackImage) {
     if let Some(mut image) = images.get_mut(handle) {
         *image = pack_image(source);
@@ -235,7 +258,7 @@ fn pack_image(source: &PackImage) -> Image {
 
 fn animate_environment(
     time: Res<Time>,
-    day: Res<DayCycleResource>,
+    presentation_day: PresentationDay,
     moon_materials: Res<MoonMaterials>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     camera: Single<&Projection, With<GameCamera>>,
@@ -244,9 +267,10 @@ fn animate_environment(
     let Projection::Orthographic(projection) = *camera else {
         return;
     };
+    let day = presentation_day.get();
     let half_view = projection.area.half_size();
     let (sun_position, moon_position) = celestial_positions(day.phase(), half_view);
-    let palette = LightingPalette::from_day(&day);
+    let palette = LightingPalette::from_day(day);
     let (bottom, top) = (palette.sky_bottom, palette.sky_top);
     let night = day.night();
 

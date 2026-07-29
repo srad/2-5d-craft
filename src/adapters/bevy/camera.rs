@@ -1,5 +1,8 @@
-use crate::AppState;
-use crate::{adapters::bevy::player::Player, domain::WORLD_HEIGHT};
+use crate::{
+    AppState,
+    adapters::bevy::{environment_flag, player::Player},
+    domain::WORLD_HEIGHT,
+};
 use bevy::camera::{ClearColorConfig, Hdr, ScalingMode};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::post_process::bloom::Bloom;
@@ -7,7 +10,7 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::ui::IsDefaultUiCamera;
 
-const CAMERA_SCALE: f32 = 1.0 / 32.0;
+pub(crate) const GAME_CAMERA_SCALE: f32 = 1.0 / 32.0;
 const CAMERA_DECAY: f32 = 8.0;
 const CAMERA_DISTANCE: f32 = 40.0;
 const CAMERA_YAW: f32 = 10.0 * std::f32::consts::PI / 180.0;
@@ -30,6 +33,7 @@ impl Plugin for CameraPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_scene)
             .add_systems(OnEnter(AppState::Playing), arm_automatic_screenshot)
+            .add_systems(OnEnter(AppState::MainMenu), arm_menu_automatic_screenshot)
             .add_systems(
                 Update,
                 (
@@ -69,6 +73,12 @@ fn arm_automatic_screenshot(mut commands: Commands) {
     }
 }
 
+fn arm_menu_automatic_screenshot(commands: Commands) {
+    if !environment_flag("SIDECRAFT_AUTOSTART") {
+        arm_automatic_screenshot(commands);
+    }
+}
+
 fn capture_automatic_screenshot(
     mut commands: Commands,
     time: Res<Time>,
@@ -93,7 +103,7 @@ fn setup_scene(mut commands: Commands) {
         },
         Projection::from(OrthographicProjection {
             scaling_mode: ScalingMode::WindowSize,
-            scale: CAMERA_SCALE,
+            scale: GAME_CAMERA_SCALE,
             ..OrthographicProjection::default_3d()
         }),
         camera_transform(Vec3::new(100.0, 40.0, 0.0)),
@@ -136,7 +146,21 @@ fn follow_player(
 
 pub(crate) fn center_camera(target: Vec2, camera: &mut Transform, rig: &mut CameraRig) {
     rig.logical_position = target;
-    *camera = camera_transform(snap_camera_target(target.extend(0.0), CAMERA_SCALE));
+    *camera = camera_transform(snap_camera_target(target.extend(0.0), GAME_CAMERA_SCALE));
+}
+
+pub(crate) fn frame_camera(
+    target: Vec2,
+    scale: f32,
+    camera: &mut Transform,
+    projection: &mut Projection,
+    rig: &mut CameraRig,
+) {
+    rig.logical_position = target;
+    if let Projection::Orthographic(orthographic) = projection {
+        orthographic.scale = scale;
+    }
+    *camera = camera_transform(snap_camera_target(target.extend(0.0), scale));
 }
 
 fn camera_offset() -> Vec3 {
@@ -252,10 +276,14 @@ mod tests {
 
     #[test]
     fn camera_target_snaps_in_view_space() {
-        let snapped = snap_camera_target(Vec3::new(1.017, 2.013, 0.0), CAMERA_SCALE);
+        let snapped = snap_camera_target(Vec3::new(1.017, 2.013, 0.0), GAME_CAMERA_SCALE);
         let local = camera_rotation().inverse() * snapped;
-        assert!((local.x / CAMERA_SCALE - (local.x / CAMERA_SCALE).round()).abs() < 0.0001);
-        assert!((local.y / CAMERA_SCALE - (local.y / CAMERA_SCALE).round()).abs() < 0.0001);
+        assert!(
+            (local.x / GAME_CAMERA_SCALE - (local.x / GAME_CAMERA_SCALE).round()).abs() < 0.0001
+        );
+        assert!(
+            (local.y / GAME_CAMERA_SCALE - (local.y / GAME_CAMERA_SCALE).round()).abs() < 0.0001
+        );
     }
 
     #[test]
@@ -265,7 +293,7 @@ mod tests {
             logical_position: Vec2::new(100.0, 40.0),
         };
         center_camera(Vec2::new(-12.5, 34.0), &mut camera, &mut rig);
-        let expected_target = snap_camera_target(Vec3::new(-12.5, 34.0, 0.0), CAMERA_SCALE);
+        let expected_target = snap_camera_target(Vec3::new(-12.5, 34.0, 0.0), GAME_CAMERA_SCALE);
         assert_eq!(
             camera.translation,
             camera_transform(expected_target).translation

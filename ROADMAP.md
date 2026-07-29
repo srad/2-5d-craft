@@ -23,12 +23,12 @@ caves, water, plants, and technology progression of
 - Active item: none
 - Next item: M1.3 — add one local PowerShell quality-gate command
 - Blocker: none
-- Last completed work item: M6 texture-pack slice — added the standalone
-  deterministic generator, versioned packs, runtime selection, and previews
+- Last completed work item: M6 menu-presentation slice — added state-driven
+  Settings and Texture Packs menus, staged live pack previews, and a responsive
+  fixed-scene voxel showcase across front-end states
 - Verification baseline: confirmed 2026-07-29; formatting, Clippy with warnings
-  denied, 122 automated tests, the release build, and real-GPU day/night
-  captures of the default and two contrasting generated texture packs
-  passed locally
+  denied, 128 automated tests, the release build, and real-GPU gameplay,
+  texture-pack, and live main-menu captures passed locally
 
 At the start of a work session, mark exactly one item `[~]`. At the end, change
 it to `[x]`, `[!]`, or `[ ]`, record the next concrete item here, and record any
@@ -56,7 +56,8 @@ from code inspection alone.
 
 ## M0 — Playable foundation `[x]`
 
-- `[x]` Main menu, world selection, loading, gameplay HUD, pause, and saving.
+- `[x]` State-driven main/settings/texture-pack menus, world selection,
+  loading, gameplay HUD, pause, and saving.
 - `[x]` Side-on player movement and interaction locked to the foreground.
 - `[x]` Six correlated voxel depth slices rendered through Bevy's 3D stack.
 - `[x]` Deterministic terrain with caves, ores, vegetation, and bedrock.
@@ -279,8 +280,11 @@ engine form a coherent living-builder loop.
   palette, quality, recipe, batch, and per-material CLI controls.
 - `[x]` Add schema-1 full and partial texture packs, strict PNG/path validation,
   a checked-in default pack, authoritative previews, global atomic selection,
-  main-menu switching, stable runtime asset handles, environment assets,
+  live staged menu switching, stable runtime asset handles, environment assets,
   player colors, and hotbar icons.
+- `[x]` Replace the runtime preview thumbnail with a responsive fixed-noon live
+  voxel showcase across front-end states, including every block, six scenery
+  depths, the player palette, shared environment art, and version chrome.
 - `[ ]` Add further material-specific face variation and restrained block
   silhouette cues without smoothing the pixel-art aesthetic.
 - `[ ]` Add fluid surfaces, falling-block interpolation, plant animation,

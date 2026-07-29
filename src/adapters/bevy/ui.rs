@@ -4,24 +4,15 @@ use bevy::prelude::*;
 use crate::{
     AppState,
     adapters::bevy::{
-        WorldCatalogResource, environment_flag,
         player::{Hotbar, Player},
-        rendering::{RenderCatalog, set_pack_preview},
+        rendering::RenderCatalog,
         session::SessionCommand,
-        textures::{TexturePackCatalog, TexturePackChanged},
     },
     application::WorldId,
     domain::BlockState,
 };
 
-#[derive(Component)]
-struct MainMenuRoot;
-
-#[derive(Component)]
-struct WorldSelectRoot;
-
-#[derive(Component)]
-struct TexturePackRoot;
+mod menus;
 
 #[derive(Component)]
 struct LoadingRoot;
@@ -36,9 +27,11 @@ struct PauseRoot;
 struct SavingRoot;
 
 #[derive(Component, Debug, Clone)]
-enum UiAction {
+pub(super) enum UiAction {
     NewWorld,
     ShowWorlds,
+    ShowMainMenu,
+    ShowSettings,
     ShowTexturePacks,
     SelectTexturePack(String),
     TexturePackPage(i32),
@@ -48,7 +41,6 @@ enum UiAction {
     SaveAndQuit,
     RetrySave,
     QuitWithoutSaving,
-    Back,
     Quit,
 }
 
@@ -62,9 +54,10 @@ impl UiAction {
             UiAction::SaveAndQuit => Some(SessionCommand::SaveAndQuit),
             UiAction::RetrySave => Some(SessionCommand::RetrySave),
             UiAction::QuitWithoutSaving => Some(SessionCommand::QuitWithoutSaving),
-            UiAction::Back => Some(SessionCommand::Back),
             UiAction::Quit => Some(SessionCommand::Quit),
-            UiAction::ShowTexturePacks
+            UiAction::ShowMainMenu
+            | UiAction::ShowSettings
+            | UiAction::ShowTexturePacks
             | UiAction::SelectTexturePack(_)
             | UiAction::TexturePackPage(_)
             | UiAction::ApplyTexturePack => None,
@@ -81,15 +74,8 @@ struct HotbarSlot(u8);
 #[derive(Component)]
 struct SelectedItemText;
 
-#[derive(Resource, Default)]
-struct TexturePackMenuState {
-    selected: String,
-    page: usize,
-    rebuild: bool,
-}
-
 #[derive(Resource, Clone)]
-struct UiFont(FontSource);
+pub(super) struct UiFont(pub(super) FontSource);
 
 #[derive(Resource, Default)]
 pub(crate) struct UiStatus(pub(crate) String);
@@ -106,14 +92,6 @@ pub struct GameUiPlugin;
 impl Plugin for GameUiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<UiStatus>()
-            .init_resource::<WorldCatalogResource>()
-            .init_resource::<TexturePackMenuState>()
-            .add_systems(
-                OnEnter(AppState::MainMenu),
-                (spawn_main_menu, autostart_world),
-            )
-            .add_systems(OnEnter(AppState::TexturePacks), spawn_texture_pack_menu)
-            .add_systems(OnEnter(AppState::WorldSelect), spawn_world_select)
             .add_systems(OnEnter(AppState::LoadingWorld), spawn_loading_screen)
             .add_systems(OnEnter(AppState::Saving), spawn_saving_screen)
             .add_systems(OnEnter(AppState::Playing), (resume_physics, spawn_hud))
@@ -124,13 +102,13 @@ impl Plugin for GameUiPlugin {
             .add_systems(
                 Update,
                 (
-                    handle_actions,
-                    rebuild_texture_pack_menu.after(handle_actions),
+                    handle_session_actions,
                     style_buttons,
                     update_status_text,
                     update_hotbar.run_if(in_state(AppState::Playing)),
                 ),
             );
+        menus::register(app);
     }
 
     fn finish(&self, app: &mut App) {
@@ -139,228 +117,6 @@ impl Plugin for GameUiPlugin {
         let handle = app.world_mut().resource_mut::<Assets<Font>>().add(font);
         app.insert_resource(UiFont(handle.into()));
     }
-}
-
-fn spawn_main_menu(mut commands: Commands, ui_font: Res<UiFont>) {
-    if environment_flag("SIDECRAFT_AUTOSTART") {
-        return;
-    }
-    let font = ui_font.0.clone();
-    commands
-        .spawn((
-            root_node(Color::srgb(0.035, 0.055, 0.085)),
-            MainMenuRoot,
-            DespawnOnExit(AppState::MainMenu),
-        ))
-        .with_children(|root| {
-            root.spawn((
-                Text::new("SIDECRAFT"),
-                TextFont {
-                    font: font.clone(),
-                    font_size: FontSize::Px(76.0),
-                    ..default()
-                },
-                TextColor(Color::srgb(0.90, 0.95, 1.0)),
-            ));
-            root.spawn((
-                Text::new("A pixel 2.5D sandbox"),
-                TextFont {
-                    font: font.clone(),
-                    font_size: FontSize::Px(28.0),
-                    ..default()
-                },
-                TextColor(Color::srgb(0.55, 0.72, 0.82)),
-            ));
-            spawn_button(root, &font, "NEW WORLD", UiAction::NewWorld);
-            spawn_button(root, &font, "LOAD WORLD", UiAction::ShowWorlds);
-            spawn_button(root, &font, "TEXTURE PACKS", UiAction::ShowTexturePacks);
-            spawn_button(root, &font, "QUIT", UiAction::Quit);
-            spawn_status(root, &font);
-        });
-}
-
-fn autostart_world(mut messages: MessageWriter<SessionCommand>) {
-    if environment_flag("SIDECRAFT_AUTOSTART") {
-        messages.write(SessionCommand::NewWorld);
-    }
-}
-
-fn spawn_world_select(
-    mut commands: Commands,
-    ui_font: Res<UiFont>,
-    catalog: Res<WorldCatalogResource>,
-) {
-    let font = ui_font.0.clone();
-    commands
-        .spawn((
-            root_node(Color::srgb(0.04, 0.055, 0.075)),
-            WorldSelectRoot,
-            DespawnOnExit(AppState::WorldSelect),
-        ))
-        .with_children(|root| {
-            root.spawn((
-                Text::new("SELECT WORLD"),
-                TextFont {
-                    font: font.clone(),
-                    font_size: FontSize::Px(56.0),
-                    ..default()
-                },
-                TextColor(Color::WHITE),
-            ));
-            if catalog.valid.is_empty() {
-                root.spawn((
-                    Text::new("No saved worlds yet"),
-                    TextFont {
-                        font: font.clone(),
-                        font_size: FontSize::Px(28.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.65, 0.70, 0.75)),
-                ));
-            }
-            for world in &catalog.valid {
-                spawn_button(
-                    root,
-                    &font,
-                    &world.name,
-                    UiAction::LoadWorld(world.id.clone()),
-                );
-            }
-            spawn_button(root, &font, "BACK", UiAction::Back);
-            spawn_status(root, &font);
-        });
-}
-
-fn spawn_texture_pack_menu(
-    mut commands: Commands,
-    ui_font: Res<UiFont>,
-    render_catalog: Res<RenderCatalog>,
-    mut images: ResMut<Assets<Image>>,
-    mut texture_packs: ResMut<TexturePackCatalog>,
-    mut menu: ResMut<TexturePackMenuState>,
-    mut status: ResMut<UiStatus>,
-) {
-    texture_packs.refresh();
-    menu.selected = texture_packs.active_id().to_owned();
-    menu.page = 0;
-    menu.rebuild = false;
-    if !texture_packs.diagnostic.is_empty() {
-        status.0.clone_from(&texture_packs.diagnostic);
-    }
-    set_pack_preview(&render_catalog, &mut images, &texture_packs.active.preview);
-    spawn_texture_pack_menu_view(
-        &mut commands,
-        &ui_font,
-        &render_catalog,
-        &texture_packs,
-        &menu,
-    );
-}
-
-fn rebuild_texture_pack_menu(
-    mut commands: Commands,
-    roots: Query<Entity, With<TexturePackRoot>>,
-    ui_font: Res<UiFont>,
-    render_catalog: Option<Res<RenderCatalog>>,
-    texture_packs: Res<TexturePackCatalog>,
-    mut menu: ResMut<TexturePackMenuState>,
-) {
-    if !menu.rebuild {
-        return;
-    }
-    let Some(render_catalog) = render_catalog else {
-        return;
-    };
-    for entity in &roots {
-        commands.entity(entity).despawn();
-    }
-    let page_count = texture_packs.packs.len().div_ceil(2).max(1);
-    menu.page = menu.page.min(page_count - 1);
-    menu.rebuild = false;
-    spawn_texture_pack_menu_view(
-        &mut commands,
-        &ui_font,
-        &render_catalog,
-        &texture_packs,
-        &menu,
-    );
-}
-
-fn spawn_texture_pack_menu_view(
-    commands: &mut Commands,
-    ui_font: &UiFont,
-    render_catalog: &RenderCatalog,
-    texture_packs: &TexturePackCatalog,
-    menu: &TexturePackMenuState,
-) {
-    const PAGE_SIZE: usize = 2;
-    let font = ui_font.0.clone();
-    let page_count = texture_packs.packs.len().div_ceil(PAGE_SIZE).max(1);
-    let start = menu.page.min(page_count - 1) * PAGE_SIZE;
-    commands
-        .spawn((
-            texture_pack_root_node(),
-            TexturePackRoot,
-            DespawnOnExit(AppState::TexturePacks),
-        ))
-        .with_children(|root| {
-            root.spawn((
-                Text::new("TEXTURE PACKS"),
-                TextFont {
-                    font: font.clone(),
-                    font_size: FontSize::Px(42.0),
-                    ..default()
-                },
-                TextColor(Color::WHITE),
-            ));
-            root.spawn((
-                ImageNode::new(render_catalog.pack_preview.clone()),
-                Node {
-                    width: px(192),
-                    height: px(108),
-                    border: UiRect::all(px(2)),
-                    ..default()
-                },
-                BorderColor::all(Color::srgb(0.38, 0.45, 0.48)),
-            ));
-            for pack in texture_packs.packs.iter().skip(start).take(PAGE_SIZE) {
-                let selected = pack.id == menu.selected;
-                let active = pack.id == texture_packs.active_id();
-                let state = if pack.validation_error.is_some() {
-                    "INVALID"
-                } else if active {
-                    "ACTIVE"
-                } else if selected {
-                    "SELECTED"
-                } else {
-                    "READY"
-                };
-                spawn_compact_button(
-                    root,
-                    &font,
-                    &format!("{} — {} [{state}]", pack.name, pack.author),
-                    UiAction::SelectTexturePack(pack.id.clone()),
-                );
-            }
-            root.spawn((
-                Text::new(format!("PAGE {} / {page_count}", menu.page + 1)),
-                TextFont {
-                    font: font.clone(),
-                    font_size: FontSize::Px(18.0),
-                    ..default()
-                },
-                TextColor(Color::srgb(0.62, 0.70, 0.74)),
-            ));
-            if menu.page > 0 {
-                spawn_compact_button(root, &font, "PREVIOUS", UiAction::TexturePackPage(-1));
-            }
-            if menu.page + 1 < page_count {
-                spawn_compact_button(root, &font, "NEXT", UiAction::TexturePackPage(1));
-            }
-            spawn_compact_button(root, &font, "APPLY", UiAction::ApplyTexturePack);
-            spawn_compact_button(root, &font, "BACK", UiAction::Back);
-            spawn_status(root, &font);
-        });
 }
 
 fn spawn_pause_menu(mut commands: Commands, ui_font: Res<UiFont>) {
@@ -395,39 +151,47 @@ fn spawn_pause_menu(mut commands: Commands, ui_font: Res<UiFont>) {
 }
 
 fn spawn_loading_screen(mut commands: Commands, ui_font: Res<UiFont>) {
+    let font = ui_font.0.clone();
     commands
         .spawn((
-            root_node(Color::srgb(0.035, 0.055, 0.085)),
+            front_end_root_node(),
             LoadingRoot,
             DespawnOnExit(AppState::LoadingWorld),
         ))
-        .with_child((
-            Text::new("GENERATING WORLD..."),
-            TextFont {
-                font: ui_font.0.clone(),
-                font_size: FontSize::Px(42.0),
-                ..default()
-            },
-            TextColor(Color::WHITE),
-        ));
+        .with_children(|root| {
+            root.spawn(menu_panel_node(420.0)).with_child((
+                Text::new("GENERATING WORLD..."),
+                TextFont {
+                    font: font.clone(),
+                    font_size: FontSize::Px(42.0),
+                    ..default()
+                },
+                TextColor(Color::WHITE),
+            ));
+            spawn_version(root, &font);
+        });
 }
 
 fn spawn_saving_screen(mut commands: Commands, ui_font: Res<UiFont>) {
+    let font = ui_font.0.clone();
     commands
         .spawn((
-            root_node(Color::srgba(0.015, 0.020, 0.030, 0.90)),
+            front_end_root_node(),
             SavingRoot,
             DespawnOnExit(AppState::Saving),
         ))
-        .with_child((
-            Text::new("SAVING WORLD..."),
-            TextFont {
-                font: ui_font.0.clone(),
-                font_size: FontSize::Px(42.0),
-                ..default()
-            },
-            TextColor(Color::WHITE),
-        ));
+        .with_children(|root| {
+            root.spawn(menu_panel_node(420.0)).with_child((
+                Text::new("SAVING WORLD..."),
+                TextFont {
+                    font: font.clone(),
+                    font_size: FontSize::Px(42.0),
+                    ..default()
+                },
+                TextColor(Color::WHITE),
+            ));
+            spawn_version(root, &font);
+        });
 }
 
 fn spawn_hud(mut commands: Commands, ui_font: Res<UiFont>, render_catalog: Res<RenderCatalog>) {
@@ -536,22 +300,38 @@ fn root_node(color: Color) -> (Node, BackgroundColor) {
     )
 }
 
-fn texture_pack_root_node() -> (Node, BackgroundColor) {
+pub(super) fn front_end_root_node() -> (Node, BackgroundColor) {
     (
         Node {
             width: percent(100),
             height: percent(100),
             flex_direction: FlexDirection::Column,
             justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            row_gap: px(4),
+            align_items: AlignItems::FlexStart,
+            padding: UiRect::horizontal(px(40)),
             ..default()
         },
-        BackgroundColor(Color::srgb(0.035, 0.050, 0.068)),
+        BackgroundColor(Color::NONE),
     )
 }
 
-fn spawn_button(
+pub(super) fn menu_panel_node(width: f32) -> (Node, BackgroundColor, BorderColor) {
+    (
+        Node {
+            width: px(width),
+            flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center,
+            row_gap: px(10),
+            padding: UiRect::all(px(24)),
+            border: UiRect::all(px(2)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.025, 0.045, 0.055, 0.88)),
+        BorderColor::all(Color::srgba(0.42, 0.54, 0.48, 0.82)),
+    )
+}
+
+pub(super) fn spawn_button(
     parent: &mut ChildSpawnerCommands,
     font: &FontSource,
     label: &str,
@@ -583,7 +363,7 @@ fn spawn_button(
         ));
 }
 
-fn spawn_compact_button(
+pub(super) fn spawn_compact_button(
     parent: &mut ChildSpawnerCommands,
     font: &FontSource,
     label: &str,
@@ -615,7 +395,7 @@ fn spawn_compact_button(
         ));
 }
 
-fn spawn_status(parent: &mut ChildSpawnerCommands, font: &FontSource) {
+pub(super) fn spawn_status(parent: &mut ChildSpawnerCommands, font: &FontSource) {
     parent.spawn((
         Text::new(""),
         TextFont {
@@ -628,17 +408,27 @@ fn spawn_status(parent: &mut ChildSpawnerCommands, font: &FontSource) {
     ));
 }
 
-#[allow(clippy::too_many_arguments)]
-fn handle_actions(
+pub(super) fn spawn_version(parent: &mut ChildSpawnerCommands, font: &FontSource) {
+    parent.spawn((
+        Text::new(format!("SIDECRAFT v{}", env!("CARGO_PKG_VERSION"))),
+        TextFont {
+            font: font.clone(),
+            font_size: FontSize::Px(20.0),
+            ..default()
+        },
+        TextColor(Color::srgba(0.86, 0.90, 0.84, 0.88)),
+        Node {
+            position_type: PositionType::Absolute,
+            right: px(18),
+            bottom: px(12),
+            ..default()
+        },
+    ));
+}
+
+fn handle_session_actions(
     interactions: Query<(&Interaction, &UiAction), Changed<Interaction>>,
     mut messages: MessageWriter<SessionCommand>,
-    mut pack_changes: MessageWriter<TexturePackChanged>,
-    mut next_state: ResMut<NextState<AppState>>,
-    mut texture_packs: ResMut<TexturePackCatalog>,
-    mut menu: ResMut<TexturePackMenuState>,
-    render_catalog: Option<Res<RenderCatalog>>,
-    mut images: ResMut<Assets<Image>>,
-    mut status: ResMut<UiStatus>,
 ) {
     for (interaction, action) in &interactions {
         if *interaction != Interaction::Pressed {
@@ -646,44 +436,6 @@ fn handle_actions(
         }
         if let Some(command) = action.session_command() {
             messages.write(command);
-            continue;
-        }
-        match action {
-            UiAction::ShowTexturePacks => {
-                menu.page = 0;
-                next_state.set(AppState::TexturePacks);
-            }
-            UiAction::SelectTexturePack(id) => match texture_packs.resolve(id) {
-                Ok(pack) => {
-                    if let Some(render_catalog) = &render_catalog {
-                        set_pack_preview(render_catalog, &mut images, &pack.preview);
-                    }
-                    menu.selected.clone_from(id);
-                    menu.rebuild = true;
-                    status.0.clear();
-                }
-                Err(error) => status.0 = format!("Could not preview texture pack: {error}"),
-            },
-            UiAction::TexturePackPage(offset) => {
-                menu.page = if *offset < 0 {
-                    menu.page.saturating_sub(offset.unsigned_abs() as usize)
-                } else {
-                    menu.page.saturating_add(*offset as usize)
-                };
-                menu.rebuild = true;
-            }
-            UiAction::ApplyTexturePack => {
-                let selected = menu.selected.clone();
-                match texture_packs.apply(&selected) {
-                    Ok(()) => {
-                        pack_changes.write(TexturePackChanged);
-                        status.0 = format!("Applied {}", texture_packs.active.manifest.name);
-                        menu.rebuild = true;
-                    }
-                    Err(error) => status.0 = format!("Could not apply texture pack: {error}"),
-                }
-            }
-            _ => {}
         }
     }
 }
@@ -759,6 +511,6 @@ mod tests {
                 .is_none()
         );
         assert!(UiAction::ApplyTexturePack.session_command().is_none());
-        assert!(UiAction::Back.session_command().is_some());
+        assert!(UiAction::ShowSettings.session_command().is_none());
     }
 }

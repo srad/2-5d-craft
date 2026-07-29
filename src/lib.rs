@@ -13,6 +13,7 @@ pub enum AppState {
     #[default]
     Boot,
     MainMenu,
+    Settings,
     TexturePacks,
     WorldSelect,
     LoadingWorld,
@@ -53,6 +54,7 @@ impl Plugin for GamePlugin {
                 adapters::bevy::interaction::InteractionPlugin,
                 adapters::bevy::camera::CameraPlugin,
                 adapters::bevy::environment::EnvironmentPlugin,
+                adapters::bevy::showcase::MenuShowcasePlugin,
                 adapters::bevy::save::SavePlugin,
                 adapters::bevy::session::SessionPlugin,
                 adapters::bevy::ui::GameUiPlugin,

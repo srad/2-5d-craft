@@ -88,12 +88,15 @@ unsupported torches, and blocks overlapping the player.
 - A versioned texture-pack pipeline with four 16-by-16 variants per face,
   closely spaced earthy palettes, connected pixel-art clusters, semantic
   grass, bark, ring, ore, leaf, bedrock, and torch motifs, environment art,
-  hotbar icons, player colors, partial-pack fallback, validation, previews,
-  and main-menu switching. Nearest-neighbor textures retain linearly sampled
-  lighting, directional face shading, uniform depth exposure, and bounded
-  depth haze.
-- Main menu, world selection, HUD, and pause/save controls. Button actions are
-  triggered only by Bevy's `Interaction::Pressed` state.
+  hotbar icons, player colors, partial-pack fallback, validation, generator
+  previews, and live in-game previewing. Nearest-neighbor textures retain
+  linearly sampled lighting, directional face shading, uniform depth exposure,
+  and bounded depth haze.
+- A state-driven Main Menu > Settings > Texture Packs flow, world selection,
+  loading/saving overlays, HUD, and pause controls. Front-end screens share a
+  live fixed voxel showcase, use translucent left-side panels, and show the
+  game version in the lower-right corner. Button actions are triggered only by
+  Bevy's `Interaction::Pressed` state.
 - Autosave after changed world data, save on pause, and save-aware window
   closing.
 
@@ -130,9 +133,11 @@ current save model with exact-schema SCW version 5.
 
 The complete built-in pack is under `assets/texture-packs/default`. User packs
 are folders under `texture-packs/`; partial packs inherit each missing face,
-icon, environment image, or player color from the default. Select and apply
-packs from `TEXTURE PACKS` on the main menu. Applying validates all CPU assets
-and writes the global config before updating stable render handles.
+icon, environment image, or player color from the default. Select packs from
+`SETTINGS > TEXTURE PACKS` to preview them immediately on the live menu scene.
+`APPLY` validates and persists the selection before updating stable render
+handles; `BACK` restores the active pack. The generator's `preview.png` remains
+an external pack-development artifact rather than a runtime thumbnail.
 
 The generator is a separate publishable package:
 
@@ -160,7 +165,8 @@ src/
   domain/          Blocks, dense chunks, generation, targeting, lighting, time
   application/     World/session state, streaming plans, snapshots, save policy
   adapters/
-    bevy/           ECS, Avian, rendering, input, UI, session and save systems
+    bevy/           ECS, Avian, rendering, showcase, menu/UI, session and save
+                    systems
     storage/        SCW packages, validation, compression, atomic manifests
   lib.rs            AppState, concrete adapter selection and system ordering
   main.rs           Desktop window and Bevy startup
@@ -173,8 +179,10 @@ and chunk changes. The application records persistence dirtiness from those
 reports; Bevy coalesces independent render, lighting, collision, and simulation
 dirty sets before rebuilding derived state. `WorldPresentation` owns only scene
 entities. `WorldRepository` isolates logical world identity from filesystem
-paths, while `SaveCoordinator` serializes and escalates save intent. Menus emit
-session commands; they do not load or save worlds directly.
+paths, while `SaveCoordinator` serializes and escalates save intent. The menu
+subsystem owns front-end navigation and staged texture previews; it emits
+session commands for world lifecycle work and never loads or saves worlds
+directly.
 
 The dependency direction, mutation boundary, simulation contract, threading
 rules, SCW schema policy, and module-boundary rules are defined in
@@ -225,10 +233,11 @@ autostart and accept decimal `u64` values. The seed makes terrain and spawn
 repeatable. The requested clock remains frozen for the test session, so
 captures can target sunrise (`0`), noon (`6000`), sunset (`12000`), midnight
 (`18000`), or a later moon phase exactly. Invalid or missing overrides retain
-the normal random seed and advancing clock. Without autostart, startup follows
-the normal main-menu flow. The rendered smoke test still requires a real window
-and graphics adapter. `SIDECRAFT_TEST_TORCH_FIXTURE` is also autostart-only; it
-places supported floor and wall torches through the normal mutation boundary.
+the normal random seed and advancing clock. Without autostart,
+`SIDECRAFT_AUTOCAPTURE` captures the live main menu instead. The rendered smoke
+test still requires a real window and graphics adapter.
+`SIDECRAFT_TEST_TORCH_FIXTURE` is also autostart-only; it places supported floor
+and wall torches through the normal mutation boundary.
 `SIDECRAFT_TEST_TORCH_INTENSITY_PERCENT` is autostart-only and accepts `92..=108`
 to freeze the visual flicker at a deterministic intensity for GPU comparison.
 

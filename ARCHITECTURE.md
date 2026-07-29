@@ -176,10 +176,24 @@ struct BlockState {
   deterministic generation, and preview composition. The Bevy adapter owns
   global selection and replaces atlas, environment, hotbar, and player-color
   asset contents in place so runtime handles remain stable.
-- Pack switching is allowed only from the main menu. A candidate is fully
-  resolved and validated and `sidecraft.toml` is atomically replaced before
-  the active resource changes. A failed apply leaves the prior pack active;
-  an invalid saved selection falls back to the complete built-in default.
+- Front-end menus are a state-driven subsystem under `bevy::ui::menus`.
+  Ordinary navigation owns no world lifecycle work: new/load/save actions are
+  translated into session commands, while menu-local state changes remain
+  inside the menu subsystem. Shared widgets, status text, transition overlays,
+  and gameplay HUDs stay in the parent UI composition module. The texture-pack
+  picker is a child module because preview staging and restoration have their
+  own lifecycle and failure rules.
+- Pack switching is allowed only from Settings > Texture Packs. Selecting a
+  candidate fully resolves and validates it in memory, then stages its atlas,
+  environment, and player palette on the live menu scene. Apply atomically
+  replaces `sidecraft.toml` before the active resource changes; leaving without
+  applying restores the active pack. A failed apply leaves the prior pack
+  active, and an invalid saved selection falls back to the built-in default.
+- Front-end states render one fixed voxel showcase through the same meshing,
+  atlas, environment, player-palette, and derived-lighting paths as gameplay.
+  Its camera framing and fixed-noon presentation state are isolated from the
+  saved gameplay camera and day cycle. Loading keeps the showcase; Saving
+  retains the actual world behind its overlay.
 
 ## World mutation boundary
 

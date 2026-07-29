@@ -3,7 +3,8 @@ use crate::{
     adapters::bevy::{
         DayCycleResource, RuntimeSet, configured_autostart_u64,
         lighting::LightingPalette,
-        textures::{TexturePackCatalog, TexturePackChanged},
+        showcase::PresentationDay,
+        textures::{TexturePackCatalog, TexturePackChanged, TexturePackPreview},
         world::WorldEntity,
     },
     domain::{
@@ -55,7 +56,6 @@ pub struct RenderCatalog {
     pub player_materials: Vec<Handle<StandardMaterial>>,
     pub player_palette: [LinearRgba; 5],
     pub(crate) hotbar_icons: Vec<Handle<Image>>,
-    pub(crate) pack_preview: Handle<Image>,
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
@@ -181,7 +181,7 @@ impl Plugin for RenderingPlugin {
         ))
         .init_resource::<TorchFlicker>()
         .add_systems(Startup, build_catalog)
-        .add_systems(Update, apply_texture_pack)
+        .add_systems(Update, (apply_texture_pack, apply_texture_pack_preview))
         .add_systems(
             Update,
             advance_torch_flicker
@@ -190,9 +190,7 @@ impl Plugin for RenderingPlugin {
         )
         .add_systems(
             Update,
-            (update_voxel_lightmap, update_torch_material)
-                .in_set(RuntimeSet::Derived)
-                .run_if(in_state(AppState::Playing)),
+            (update_voxel_lightmap, update_torch_material).in_set(RuntimeSet::Derived),
         );
     }
 }
@@ -258,8 +256,6 @@ fn build_catalog(
         .into_iter()
         .map(|block| images.add(pack_image(&texture_packs.active.icons[&block])))
         .collect();
-    let pack_preview = images.add(pack_image(&texture_packs.active.preview));
-
     commands.insert_resource(RenderCatalog {
         atlas,
         opaque_material,
@@ -271,7 +267,6 @@ fn build_catalog(
         player_materials,
         player_palette,
         hotbar_icons,
-        pack_preview,
     });
     commands.insert_resource(VoxelLightmap {
         colors: lightmap_colors,
@@ -281,7 +276,7 @@ fn build_catalog(
 }
 
 fn update_voxel_lightmap(
-    day: Res<DayCycleResource>,
+    presentation_day: PresentationDay,
     catalog: Option<Res<RenderCatalog>>,
     mut lightmap: Option<ResMut<VoxelLightmap>>,
     mut images: ResMut<Assets<Image>>,
@@ -291,8 +286,9 @@ fn update_voxel_lightmap(
     let (Some(catalog), Some(lightmap)) = (catalog, lightmap.as_mut()) else {
         return;
     };
-    let palette = LightingPalette::from_day(&day);
-    let colors = generate_lightmap(day.daylight(), palette, flicker.intensity);
+    let displayed_day = presentation_day.get();
+    let palette = LightingPalette::from_day(displayed_day);
+    let colors = generate_lightmap(displayed_day.daylight(), palette, flicker.intensity);
     let bytes = encode_lightmap(&colors);
     if bytes != lightmap.bytes {
         if let Some(mut image) = images.get_mut(&lightmap.image) {
@@ -494,9 +490,6 @@ pub fn build_chunk_meshes(
     seed: u64,
     light: &LightVolume,
 ) -> ChunkMeshes {
-    let mut opaque = VoxelMeshBuilder::default();
-    let mut cutout = VoxelMeshBuilder::default();
-    let mut emissive = TorchMeshBuilder::default();
     let voxel_at = |global_x: i64, y: i32, depth: i32| -> Option<BlockState> {
         if !(0..WORLD_HEIGHT).contains(&y) || !(0..i32::from(DEPTH_SLICES)).contains(&depth) {
             return None;
@@ -507,11 +500,34 @@ pub fn build_chunk_meshes(
             generated_voxel(seed, global_x, y, depth as u8)
         }
     };
+    build_voxel_scene_meshes(
+        global_chunk_x * i64::from(CHUNK_WIDTH),
+        CHUNK_WIDTH,
+        WORLD_HEIGHT,
+        DEPTH_SLICES,
+        seed,
+        light,
+        voxel_at,
+    )
+}
 
-    for local_x in 0..CHUNK_WIDTH {
-        let global_x = global_chunk_x * i64::from(CHUNK_WIDTH) + i64::from(local_x);
-        for y in 0..WORLD_HEIGHT {
-            for depth in 0..DEPTH_SLICES {
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_voxel_scene_meshes(
+    min_x: i64,
+    width: i32,
+    height: i32,
+    depth_slices: u8,
+    seed: u64,
+    light: &LightVolume,
+    voxel_at: impl Fn(i64, i32, i32) -> Option<BlockState>,
+) -> ChunkMeshes {
+    let mut opaque = VoxelMeshBuilder::default();
+    let mut cutout = VoxelMeshBuilder::default();
+    let mut emissive = TorchMeshBuilder::default();
+    for local_x in 0..width {
+        let global_x = min_x + i64::from(local_x);
+        for y in 0..height {
+            for depth in 0..depth_slices {
                 let Some(state) = voxel_at(global_x, y, i32::from(depth)) else {
                     continue;
                 };
@@ -1143,28 +1159,47 @@ fn apply_texture_pack(
         *image = atlas;
     }
     for (handle, block) in catalog.hotbar_icons.iter().zip(PackBlock::HOTBAR) {
-        if let Some(mut image) = images.get_mut(handle) {
-            *image = pack_image(&texture_packs.active.icons[&block]);
-        }
+        replace_pack_image(&mut images, handle, &texture_packs.active.icons[&block]);
     }
-    if let Some(mut image) = images.get_mut(&catalog.pack_preview) {
-        *image = pack_image(&texture_packs.active.preview);
+    apply_player_palette(
+        catalog.as_mut(),
+        &mut materials,
+        texture_packs.active.player,
+    );
+}
+
+fn apply_texture_pack_preview(
+    preview: Res<TexturePackPreview>,
+    mut catalog: Option<ResMut<RenderCatalog>>,
+    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    if !preview.is_changed() {
+        return;
     }
-    let colors = player_colors(texture_packs.active.player);
+    let Some(catalog) = catalog.as_mut() else {
+        return;
+    };
+    let mut atlas = atlas_image(&preview.0);
+    atlas.sampler = ImageSampler::nearest();
+    if let Some(mut image) = images.get_mut(&catalog.atlas) {
+        *image = atlas;
+    }
+    apply_player_palette(catalog.as_mut(), &mut materials, preview.0.player);
+}
+
+fn apply_player_palette(
+    catalog: &mut RenderCatalog,
+    materials: &mut Assets<StandardMaterial>,
+    palette: PlayerPalette,
+) {
+    let colors = player_colors(palette);
     catalog.player_palette = colors.map(|color| color.to_linear());
     for (handle, color) in catalog.player_materials.iter().zip(colors) {
         if let Some(mut material) = materials.get_mut(handle) {
             material.base_color = color;
         }
     }
-}
-
-pub(crate) fn set_pack_preview(
-    catalog: &RenderCatalog,
-    images: &mut Assets<Image>,
-    preview: &PackImage,
-) {
-    replace_pack_image(images, &catalog.pack_preview, preview);
 }
 
 fn replace_pack_image(images: &mut Assets<Image>, handle: &Handle<Image>, source: &PackImage) {
