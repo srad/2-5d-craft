@@ -48,6 +48,9 @@ application/
 adapters/
     bevy/       ECS and presentation integrations
     storage/    schema-4 SCW package repository
+crates/
+    sidecraft-textures/
+                Bevy-free texture-pack format, generator, validator, and CLI
 lib.rs          composition root and schedule ordering
 ```
 
@@ -168,6 +171,15 @@ struct BlockState {
   never create per-block render entities.
 - Sun and moon visuals stay camera-aligned and communicate the clock state.
   They do not drive directional PBR lights or cast smooth real-time shadows.
+- Texture packs are versioned data, never executable code. The Bevy-free
+  `sidecraft-textures` package owns schema validation, partial-pack fallback,
+  deterministic generation, and preview composition. The Bevy adapter owns
+  global selection and replaces atlas, environment, hotbar, and player-color
+  asset contents in place so runtime handles remain stable.
+- Pack switching is allowed only from the main menu. A candidate is fully
+  resolved and validated and `sidecraft.toml` is atomically replaced before
+  the active resource changes. A failed apply leaves the prior pack active;
+  an invalid saved selection falls back to the complete built-in default.
 
 ## World mutation boundary
 

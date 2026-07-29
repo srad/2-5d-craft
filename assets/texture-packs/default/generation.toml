@@ -1,0 +1,25 @@
+generator_version = 1
+seed = 20260729
+
+[resolved]
+cluster-density = "0.22120027"
+cluster-shape = "Rectangular"
+cluster-size = "3"
+contrast = "1.0288548"
+"dirt.pattern" = "cluster-stamps"
+grass-fringe-depth = "4"
+leaf-hole-density = "0.046760503"
+lightness = "-0.010093754"
+ore-branches = "5"
+ore-center-bias = "0.96483856"
+ore-coverage = "0.31916764"
+ore-pattern = "CompactCellular"
+ore-thickness = "3"
+palette = "Earthy"
+pattern = "ClusterStamps"
+placement = "PoissonDisc"
+quality = "Strict"
+saturation = "1.041284"
+smoothing-passes = "1"
+"stone.pattern" = "cellular-clumps"
+variant-strength = "2"

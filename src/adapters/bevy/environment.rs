@@ -8,8 +8,12 @@ use bevy::{
 };
 
 use crate::adapters::bevy::{
-    DayCycleResource, RuntimeSet, camera::GameCamera, lighting::LightingPalette,
+    DayCycleResource, RuntimeSet,
+    camera::GameCamera,
+    lighting::LightingPalette,
+    textures::{TexturePackCatalog, TexturePackChanged},
 };
+use sidecraft_textures::PackImage;
 
 const SKY_BANDS: usize = 8;
 const SKY_DEPTH: f32 = -80.0;
@@ -39,6 +43,14 @@ struct Cloud;
 #[derive(Resource)]
 struct MoonMaterials(Vec<Handle<StandardMaterial>>);
 
+#[derive(Resource)]
+struct EnvironmentTextures {
+    stars: Handle<Image>,
+    sun: Handle<Image>,
+    moons: Vec<Handle<Image>>,
+    cloud: Handle<Image>,
+}
+
 type EnvironmentVisualQuery<'w, 's> = Query<
     'w,
     's,
@@ -58,6 +70,7 @@ pub(crate) struct EnvironmentPlugin;
 impl Plugin for EnvironmentPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(PostStartup, setup_environment)
+            .add_systems(Update, apply_texture_pack)
             .add_systems(Update, animate_environment.in_set(RuntimeSet::Derived));
     }
 }
@@ -68,6 +81,7 @@ fn setup_environment(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    texture_packs: Res<TexturePackCatalog>,
 ) {
     let sky_mesh = meshes.add(Rectangle::new(512.0, 16.0));
     let mut sky_materials = Vec::with_capacity(SKY_BANDS);
@@ -75,25 +89,31 @@ fn setup_environment(
         sky_materials.push(materials.add(unlit_material(None, Color::WHITE)));
     }
 
-    let star_texture = images.add(star_image());
+    let star_texture = images.add(pack_image(&texture_packs.active.stars));
     let star_material = materials.add(unlit_material(
-        Some(star_texture),
+        Some(star_texture.clone()),
         Color::srgba(1.0, 1.0, 1.0, 0.0),
     ));
     let star_mesh = meshes.add(Rectangle::new(72.0, 40.0));
 
-    let sun_texture = images.add(sun_image());
+    let sun_texture = images.add(pack_image(&texture_packs.active.sun));
     let sun_material = materials.add(unlit_material(
-        Some(sun_texture),
+        Some(sun_texture.clone()),
         Color::srgba(1.0, 1.0, 1.0, 1.0),
     ));
     let body_mesh = meshes.add(Rectangle::new(BODY_SIZE, BODY_SIZE));
 
-    let moon_materials = (0..8)
-        .map(|phase| {
-            let texture = images.add(moon_image(phase));
+    let moon_textures = texture_packs
+        .active
+        .moons
+        .iter()
+        .map(|moon| images.add(pack_image(moon)))
+        .collect::<Vec<_>>();
+    let moon_materials = moon_textures
+        .iter()
+        .map(|texture| {
             materials.add(unlit_material(
-                Some(texture),
+                Some(texture.clone()),
                 Color::srgba(1.0, 1.0, 1.0, 1.0),
             ))
         })
@@ -101,12 +121,18 @@ fn setup_environment(
     let initial_moon = moon_materials[0].clone();
     commands.insert_resource(MoonMaterials(moon_materials));
 
-    let cloud_texture = images.add(cloud_image());
+    let cloud_texture = images.add(pack_image(&texture_packs.active.cloud));
     let cloud_mesh = meshes.add(Rectangle::new(8.0, 3.0));
     let cloud_material = materials.add(unlit_material(
-        Some(cloud_texture),
+        Some(cloud_texture.clone()),
         Color::srgba(0.92, 0.96, 1.0, 0.72),
     ));
+    commands.insert_resource(EnvironmentTextures {
+        stars: star_texture,
+        sun: sun_texture,
+        moons: moon_textures,
+        cloud: cloud_texture,
+    });
 
     commands.entity(*camera).with_children(|parent| {
         for (index, material) in sky_materials.into_iter().enumerate() {
@@ -163,6 +189,48 @@ fn setup_environment(
             ));
         }
     });
+}
+
+fn apply_texture_pack(
+    mut changes: MessageReader<TexturePackChanged>,
+    texture_packs: Res<TexturePackCatalog>,
+    handles: Option<Res<EnvironmentTextures>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    if changes.read().next().is_none() {
+        return;
+    }
+    let Some(handles) = handles else {
+        return;
+    };
+    replace_image(&mut images, &handles.stars, &texture_packs.active.stars);
+    replace_image(&mut images, &handles.sun, &texture_packs.active.sun);
+    replace_image(&mut images, &handles.cloud, &texture_packs.active.cloud);
+    for (handle, moon) in handles.moons.iter().zip(&texture_packs.active.moons) {
+        replace_image(&mut images, handle, moon);
+    }
+}
+
+fn replace_image(images: &mut Assets<Image>, handle: &Handle<Image>, source: &PackImage) {
+    if let Some(mut image) = images.get_mut(handle) {
+        *image = pack_image(source);
+    }
+}
+
+fn pack_image(source: &PackImage) -> Image {
+    let mut image = Image::new(
+        Extent3d {
+            width: source.width,
+            height: source.height,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        source.pixels.clone(),
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    );
+    image.sampler = ImageSampler::nearest();
+    image
 }
 
 fn animate_environment(
@@ -265,6 +333,7 @@ fn unlit_material(texture: Option<Handle<Image>>, base_color: Color) -> Standard
     }
 }
 
+#[cfg(test)]
 fn sun_image() -> Image {
     let mut pixels = vec![0; 32 * 32 * 4];
     for y in 3..29 {
@@ -286,6 +355,7 @@ fn sun_image() -> Image {
     nearest_image(32, 32, pixels)
 }
 
+#[cfg(test)]
 fn moon_image(phase: usize) -> Image {
     let mut pixels = vec![0; 32 * 32 * 4];
     let illumination = [1.0, 0.75, 0.5, 0.25, 0.0, 0.25, 0.5, 0.75][phase];
@@ -318,6 +388,7 @@ fn moon_image(phase: usize) -> Image {
     nearest_image(32, 32, pixels)
 }
 
+#[cfg(test)]
 fn star_image() -> Image {
     const WIDTH: usize = 512;
     const HEIGHT: usize = 256;
@@ -343,6 +414,7 @@ fn star_image() -> Image {
     nearest_image(WIDTH as u32, HEIGHT as u32, pixels)
 }
 
+#[cfg(test)]
 fn cloud_image() -> Image {
     const WIDTH: usize = 64;
     const HEIGHT: usize = 24;
@@ -362,6 +434,7 @@ fn cloud_image() -> Image {
     nearest_image(WIDTH as u32, HEIGHT as u32, pixels)
 }
 
+#[cfg(test)]
 fn ellipse_contains(
     x: usize,
     y: usize,
@@ -375,11 +448,13 @@ fn ellipse_contains(
     dx * dx + dy * dy <= 1.0
 }
 
+#[cfg(test)]
 fn set_pixel(pixels: &mut [u8], width: usize, x: usize, y: usize, color: [u8; 4]) {
     let offset = (y * width + x) * 4;
     pixels[offset..offset + 4].copy_from_slice(&color);
 }
 
+#[cfg(test)]
 fn nearest_image(width: u32, height: u32, pixels: Vec<u8>) -> Image {
     let mut image = Image::new(
         Extent3d {

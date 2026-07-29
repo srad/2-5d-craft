@@ -23,10 +23,11 @@ caves, water, plants, and technology progression of
 - Active item: none
 - Next item: M1.3 — add one local PowerShell quality-gate command
 - Blocker: none
-- Last completed work item: M6 presentation slice — established the
-  low-resolution block and scenery aesthetic
+- Last completed work item: M6 texture-pack slice — added the standalone
+  deterministic generator, versioned packs, runtime selection, and previews
 - Verification baseline: confirmed 2026-07-29; formatting, Clippy with warnings
-  denied, 92 automated tests, the release build, and real-GPU day/night captures
+  denied, 122 automated tests, the release build, and real-GPU day/night
+  captures of the default and two contrasting generated texture packs
   passed locally
 
 At the start of a work session, mark exactly one item `[~]`. At the end, change
@@ -273,6 +274,13 @@ engine form a coherent living-builder loop.
   connected pixel-art clusters, semantic grass, wood, and ore faces, a
   cap-emissive low-poly torch, uniform depth exposure, and richer six-slice
   scenery.
+- `[x]` Replace shared procedural masks with a separately publishable,
+  deterministic texture generator supporting bounded cluster, placement, ore,
+  palette, quality, recipe, batch, and per-material CLI controls.
+- `[x]` Add schema-1 full and partial texture packs, strict PNG/path validation,
+  a checked-in default pack, authoritative previews, global atomic selection,
+  main-menu switching, stable runtime asset handles, environment assets,
+  player colors, and hotbar icons.
 - `[ ]` Add further material-specific face variation and restrained block
   silhouette cues without smoothing the pixel-art aesthetic.
 - `[ ]` Add fluid surfaces, falling-block interpolation, plant animation,

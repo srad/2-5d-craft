@@ -1,7 +1,9 @@
 use crate::{
     AppState,
     adapters::bevy::{
-        DayCycleResource, RuntimeSet, configured_autostart_u64, lighting::LightingPalette,
+        DayCycleResource, RuntimeSet, configured_autostart_u64,
+        lighting::LightingPalette,
+        textures::{TexturePackCatalog, TexturePackChanged},
         world::WorldEntity,
     },
     domain::{
@@ -22,6 +24,9 @@ use bevy::render::render_resource::{
     TextureDimension, TextureFormat, VertexFormat,
 };
 use bevy::shader::{Shader, ShaderRef};
+use sidecraft_textures::{
+    BlockKind as PackBlock, Face as PackFace, PackImage, PlayerPalette, ResolvedPack,
+};
 
 const TEXTURE_SIZE: u32 = 16;
 const LIGHTMAP_SIZE: u32 = 16;
@@ -31,7 +36,7 @@ const TORCH_SHADER_HANDLE: Handle<Shader> =
     bevy::asset::uuid_handle!("dedfb6b1-5089-40e9-a4aa-f37684b33ad3");
 const ATTRIBUTE_TORCH_EFFECT: MeshVertexAttribute =
     MeshVertexAttribute::new("TorchEffect", 2_134_867_501, VertexFormat::Float32x4);
-const ATLAS_VARIANTS: u32 = 3;
+const ATLAS_VARIANTS: u32 = 4;
 const FACE_VARIANTS: u32 = 3;
 const GUTTER: u32 = 2;
 const ATLAS_CELL: u32 = TEXTURE_SIZE + GUTTER * 2;
@@ -40,6 +45,7 @@ const TORCH_LIGHT_TINT: [f32; 3] = [1.0, 0.42, 0.08];
 
 #[derive(Resource)]
 pub struct RenderCatalog {
+    atlas: Handle<Image>,
     pub opaque_material: Handle<VoxelMaterial>,
     pub cutout_material: Handle<VoxelMaterial>,
     pub emissive_material: Handle<TorchMaterial>,
@@ -48,6 +54,8 @@ pub struct RenderCatalog {
     pub player_cube: Handle<Mesh>,
     pub player_materials: Vec<Handle<StandardMaterial>>,
     pub player_palette: [LinearRgba; 5],
+    pub(crate) hotbar_icons: Vec<Handle<Image>>,
+    pub(crate) pack_preview: Handle<Image>,
 }
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
@@ -173,6 +181,7 @@ impl Plugin for RenderingPlugin {
         ))
         .init_resource::<TorchFlicker>()
         .add_systems(Startup, build_catalog)
+        .add_systems(Update, apply_texture_pack)
         .add_systems(
             Update,
             advance_torch_flicker
@@ -188,16 +197,18 @@ impl Plugin for RenderingPlugin {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_catalog(
     mut commands: Commands,
     day: Res<DayCycleResource>,
+    texture_packs: Res<TexturePackCatalog>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut voxel_materials: ResMut<Assets<VoxelMaterial>>,
     mut torch_materials: ResMut<Assets<TorchMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    let mut atlas_image = atlas_image();
+    let mut atlas_image = atlas_image(&texture_packs.active);
     atlas_image.sampler = ImageSampler::nearest();
     let atlas = images.add(atlas_image);
     let palette = LightingPalette::from_day(&day);
@@ -218,17 +229,11 @@ fn build_catalog(
         alpha_mode: AlphaMode::Mask(0.38),
     });
     let emissive_material = torch_materials.add(TorchMaterial {
-        atlas,
+        atlas: atlas.clone(),
         effects: Vec4::new(1.0, 0.0, 0.0, 0.0),
     });
     let player_cube = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
-    let player_colors = [
-        Color::srgb(0.78, 0.52, 0.32),
-        Color::srgb(0.08, 0.38, 0.46),
-        Color::srgb(0.12, 0.16, 0.25),
-        Color::srgb(0.18, 0.09, 0.045),
-        Color::srgb(0.10, 0.08, 0.06),
-    ];
+    let player_colors = player_colors(texture_packs.active.player);
     let player_palette = player_colors.map(|color| color.to_linear());
     let player_materials = player_colors
         .into_iter()
@@ -249,8 +254,14 @@ fn build_catalog(
         cull_mode: None,
         ..default()
     });
+    let hotbar_icons = PackBlock::HOTBAR
+        .into_iter()
+        .map(|block| images.add(pack_image(&texture_packs.active.icons[&block])))
+        .collect();
+    let pack_preview = images.add(pack_image(&texture_packs.active.preview));
 
     commands.insert_resource(RenderCatalog {
+        atlas,
         opaque_material,
         cutout_material,
         emissive_material,
@@ -259,6 +270,8 @@ fn build_catalog(
         player_cube,
         player_materials,
         player_palette,
+        hotbar_icons,
+        pack_preview,
     });
     commands.insert_resource(VoxelLightmap {
         colors: lightmap_colors,
@@ -507,7 +520,7 @@ pub fn build_chunk_meshes(
                     global_x,
                     y,
                     u64::from(state.id().value()) + u64::from(depth) * 97,
-                ) % 3) as u32;
+                ) % u64::from(ATLAS_VARIANTS)) as u32;
                 if let Some(mount) = state.torch_mount() {
                     if depth == 0 {
                         emissive.push_torch(local_x as f32, y as f32, variant, mount);
@@ -1073,20 +1086,17 @@ fn lightmap_image(bytes: Vec<u8>) -> Image {
     image
 }
 
-fn atlas_image() -> Image {
+fn atlas_image(pack: &ResolvedPack) -> Image {
     let width = ATLAS_TILES * ATLAS_CELL;
     let mut pixels = vec![0; (width * ATLAS_CELL * 4) as usize];
     for (state_index, id) in BlockId::ALL.into_iter().enumerate() {
-        let state = BlockState::from_id(id);
         for face in TextureFace::ALL {
             for variant in 0..ATLAS_VARIANTS {
                 let tile =
                     (state_index as u32 * FACE_VARIANTS + face.index()) * ATLAS_VARIANTS + variant;
-                let source = if state == BlockState::TORCH {
-                    torch_pixels()
-                } else {
-                    block_face_pixels(state, variant as u8, face)
-                };
+                let source = &pack
+                    .block(pack_block(id), pack_face(face), variant as usize)
+                    .pixels;
                 for cell_y in 0..ATLAS_CELL {
                     let source_y = cell_y.saturating_sub(GUTTER).min(TEXTURE_SIZE - 1);
                     for cell_x in 0..ATLAS_CELL {
@@ -1114,21 +1124,137 @@ fn atlas_image() -> Image {
     )
 }
 
+fn apply_texture_pack(
+    mut changes: MessageReader<TexturePackChanged>,
+    texture_packs: Res<TexturePackCatalog>,
+    mut catalog: Option<ResMut<RenderCatalog>>,
+    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    if changes.read().next().is_none() {
+        return;
+    }
+    let Some(catalog) = catalog.as_mut() else {
+        return;
+    };
+    let mut atlas = atlas_image(&texture_packs.active);
+    atlas.sampler = ImageSampler::nearest();
+    if let Some(mut image) = images.get_mut(&catalog.atlas) {
+        *image = atlas;
+    }
+    for (handle, block) in catalog.hotbar_icons.iter().zip(PackBlock::HOTBAR) {
+        if let Some(mut image) = images.get_mut(handle) {
+            *image = pack_image(&texture_packs.active.icons[&block]);
+        }
+    }
+    if let Some(mut image) = images.get_mut(&catalog.pack_preview) {
+        *image = pack_image(&texture_packs.active.preview);
+    }
+    let colors = player_colors(texture_packs.active.player);
+    catalog.player_palette = colors.map(|color| color.to_linear());
+    for (handle, color) in catalog.player_materials.iter().zip(colors) {
+        if let Some(mut material) = materials.get_mut(handle) {
+            material.base_color = color;
+        }
+    }
+}
+
+pub(crate) fn set_pack_preview(
+    catalog: &RenderCatalog,
+    images: &mut Assets<Image>,
+    preview: &PackImage,
+) {
+    replace_pack_image(images, &catalog.pack_preview, preview);
+}
+
+fn replace_pack_image(images: &mut Assets<Image>, handle: &Handle<Image>, source: &PackImage) {
+    if let Some(mut image) = images.get_mut(handle) {
+        *image = pack_image(source);
+    }
+}
+
+fn pack_image(source: &PackImage) -> Image {
+    let mut image = Image::new(
+        Extent3d {
+            width: source.width,
+            height: source.height,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        source.pixels.clone(),
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    );
+    image.sampler = ImageSampler::nearest();
+    image
+}
+
+fn player_colors(palette: PlayerPalette) -> [Color; 5] {
+    [
+        srgb8(palette.skin),
+        srgb8(palette.shirt),
+        srgb8(palette.pants),
+        srgb8(palette.hair),
+        srgb8(palette.details),
+    ]
+}
+
+fn srgb8(color: [u8; 3]) -> Color {
+    Color::srgb(
+        f32::from(color[0]) / 255.0,
+        f32::from(color[1]) / 255.0,
+        f32::from(color[2]) / 255.0,
+    )
+}
+
+fn pack_block(id: BlockId) -> PackBlock {
+    match id {
+        BlockId::GRASS => PackBlock::Grass,
+        BlockId::DIRT => PackBlock::Dirt,
+        BlockId::STONE => PackBlock::Stone,
+        BlockId::COAL_ORE => PackBlock::CoalOre,
+        BlockId::IRON_ORE => PackBlock::IronOre,
+        BlockId::WOOD => PackBlock::Wood,
+        BlockId::LEAVES => PackBlock::Leaves,
+        BlockId::TORCH => PackBlock::Torch,
+        BlockId::BEDROCK => PackBlock::Bedrock,
+        _ => unreachable!("all renderable block ids have texture-pack entries"),
+    }
+}
+
+fn pack_face(face: TextureFace) -> PackFace {
+    match face {
+        TextureFace::Side => PackFace::Side,
+        TextureFace::Top => PackFace::Top,
+        TextureFace::Bottom => PackFace::Bottom,
+    }
+}
+
+#[cfg(test)]
 const GRASS_COLORS: [[u8; 3]; 4] = [[48, 101, 35], [60, 116, 38], [75, 132, 43], [91, 146, 49]];
+#[cfg(test)]
 const DIRT_COLORS: [[u8; 3]; 4] = [[94, 62, 41], [109, 73, 47], [125, 87, 58], [140, 101, 70]];
+#[cfg(test)]
 const STONE_COLORS: [[u8; 3]; 4] = [
     [88, 90, 93],
     [102, 104, 107],
     [116, 118, 120],
     [132, 133, 135],
 ];
+#[cfg(test)]
 const COAL_COLORS: [[u8; 3]; 3] = [[35, 36, 39], [48, 50, 54], [63, 65, 70]];
+#[cfg(test)]
 const IRON_COLORS: [[u8; 3]; 3] = [[126, 82, 57], [155, 105, 76], [184, 133, 98]];
+#[cfg(test)]
 const BARK_COLORS: [[u8; 3]; 4] = [[73, 43, 23], [91, 54, 28], [111, 69, 36], [134, 87, 46]];
+#[cfg(test)]
 const WOOD_RING_COLORS: [[u8; 3]; 4] = [[96, 59, 29], [118, 76, 38], [143, 98, 52], [164, 119, 67]];
+#[cfg(test)]
 const LEAF_COLORS: [[u8; 3]; 4] = [[30, 79, 31], [39, 96, 36], [49, 113, 41], [62, 130, 48]];
+#[cfg(test)]
 const BEDROCK_COLORS: [[u8; 3]; 4] = [[29, 30, 33], [42, 44, 48], [56, 58, 63], [72, 74, 79]];
 
+#[cfg(test)]
 const CLUSTER_PATTERN: [[usize; 8]; 8] = [
     [2, 2, 2, 1, 1, 2, 2, 3],
     [2, 1, 1, 1, 2, 2, 3, 3],
@@ -1140,6 +1266,7 @@ const CLUSTER_PATTERN: [[usize; 8]; 8] = [
     [3, 3, 2, 1, 2, 2, 2, 3],
 ];
 
+#[cfg(test)]
 fn clustered_color(
     colors: &[[u8; 3]; 4],
     seed: u64,
@@ -1165,18 +1292,22 @@ fn clustered_color(
     colors[CLUSTER_PATTERN[pattern_y][pattern_x]]
 }
 
+#[cfg(test)]
 fn grass_color(x: u32, y: u32, variant: u8, face: TextureFace) -> [u8; 3] {
     clustered_color(&GRASS_COLORS, 0x6a51, x, y, variant, face, 2)
 }
 
+#[cfg(test)]
 fn dirt_color(x: u32, y: u32, variant: u8, face: TextureFace) -> [u8; 3] {
     clustered_color(&DIRT_COLORS, 0xd17, x, y, variant, face, 2)
 }
 
+#[cfg(test)]
 fn stone_color(x: u32, y: u32, variant: u8, face: TextureFace) -> [u8; 3] {
     clustered_color(&STONE_COLORS, 0x570, x, y, variant, face, 2)
 }
 
+#[cfg(test)]
 fn ore_color(
     stone: [u8; 3],
     ore_colors: &[[u8; 3]; 3],
@@ -1218,6 +1349,7 @@ fn ore_color(
     stone
 }
 
+#[cfg(test)]
 fn wood_color(x: u32, y: u32, variant: u8, face: TextureFace) -> [u8; 3] {
     if matches!(face, TextureFace::Top | TextureFace::Bottom) {
         let center = (TEXTURE_SIZE as i32 - 1) / 2;
@@ -1253,6 +1385,7 @@ fn wood_color(x: u32, y: u32, variant: u8, face: TextureFace) -> [u8; 3] {
     BARK_COLORS[index]
 }
 
+#[cfg(test)]
 fn leaf_pixel(x: u32, y: u32, variant: u8, face: TextureFace) -> ([u8; 3], u8) {
     let color = clustered_color(&LEAF_COLORS, 0x1eaf, x, y, variant, face, 2);
     let shifted_x = (x + u32::from(variant) * 3 + face.index() * 2) % TEXTURE_SIZE;
@@ -1264,6 +1397,7 @@ fn leaf_pixel(x: u32, y: u32, variant: u8, face: TextureFace) -> ([u8; 3], u8) {
     (color, if transparent { 0 } else { 255 })
 }
 
+#[cfg(test)]
 fn torch_color(x: u32, y: u32) -> [u8; 3] {
     if y < TEXTURE_SIZE / 4 {
         let center_distance = (x as i32 - 7).abs();
@@ -1290,6 +1424,7 @@ pub fn block_pixels(state: BlockState, variant: u8) -> Vec<u8> {
     block_face_pixels(state, variant, TextureFace::Side)
 }
 
+#[cfg(test)]
 fn block_face_pixels(state: BlockState, variant: u8, face: TextureFace) -> Vec<u8> {
     let mut pixels = Vec::with_capacity((TEXTURE_SIZE * TEXTURE_SIZE * 4) as usize);
     for y in 0..TEXTURE_SIZE {
@@ -1335,6 +1470,7 @@ fn block_face_pixels(state: BlockState, variant: u8, face: TextureFace) -> Vec<u
     pixels
 }
 
+#[cfg(test)]
 pub fn torch_pixels() -> Vec<u8> {
     let mut pixels = Vec::with_capacity((TEXTURE_SIZE * TEXTURE_SIZE * 4) as usize);
     for y in 0..TEXTURE_SIZE {
@@ -1360,6 +1496,23 @@ mod tests {
             BlockChunk::from_dense(0, vec![0; (CHUNK_WIDTH * WORLD_HEIGHT) as usize]).unwrap(),
         );
         grid
+    }
+
+    #[test]
+    fn pack_image_replacement_preserves_the_asset_handle() {
+        let mut images = Assets::<Image>::default();
+        let handle = images.add(pack_image(&PackImage::solid(16, 16, [1, 2, 3, 255])));
+        let id = handle.id();
+        replace_pack_image(
+            &mut images,
+            &handle,
+            &PackImage::solid(16, 16, [9, 8, 7, 255]),
+        );
+        assert_eq!(handle.id(), id);
+        assert_eq!(
+            images.get(&handle).unwrap().data.as_ref().unwrap()[..4],
+            [9, 8, 7, 255]
+        );
     }
 
     #[test]

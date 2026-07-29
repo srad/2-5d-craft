@@ -6,7 +6,9 @@ use crate::{
     adapters::bevy::{
         WorldCatalogResource, environment_flag,
         player::{Hotbar, Player},
+        rendering::{RenderCatalog, set_pack_preview},
         session::SessionCommand,
+        textures::{TexturePackCatalog, TexturePackChanged},
     },
     application::WorldId,
     domain::BlockState,
@@ -17,6 +19,9 @@ struct MainMenuRoot;
 
 #[derive(Component)]
 struct WorldSelectRoot;
+
+#[derive(Component)]
+struct TexturePackRoot;
 
 #[derive(Component)]
 struct LoadingRoot;
@@ -34,6 +39,10 @@ struct SavingRoot;
 enum UiAction {
     NewWorld,
     ShowWorlds,
+    ShowTexturePacks,
+    SelectTexturePack(String),
+    TexturePackPage(i32),
+    ApplyTexturePack,
     LoadWorld(WorldId),
     Resume,
     SaveAndQuit,
@@ -43,18 +52,22 @@ enum UiAction {
     Quit,
 }
 
-impl From<&UiAction> for SessionCommand {
-    fn from(action: &UiAction) -> Self {
-        match action {
-            UiAction::NewWorld => Self::NewWorld,
-            UiAction::ShowWorlds => Self::ShowWorlds,
-            UiAction::LoadWorld(id) => Self::LoadWorld(id.clone()),
-            UiAction::Resume => Self::Resume,
-            UiAction::SaveAndQuit => Self::SaveAndQuit,
-            UiAction::RetrySave => Self::RetrySave,
-            UiAction::QuitWithoutSaving => Self::QuitWithoutSaving,
-            UiAction::Back => Self::Back,
-            UiAction::Quit => Self::Quit,
+impl UiAction {
+    fn session_command(&self) -> Option<SessionCommand> {
+        match self {
+            UiAction::NewWorld => Some(SessionCommand::NewWorld),
+            UiAction::ShowWorlds => Some(SessionCommand::ShowWorlds),
+            UiAction::LoadWorld(id) => Some(SessionCommand::LoadWorld(id.clone())),
+            UiAction::Resume => Some(SessionCommand::Resume),
+            UiAction::SaveAndQuit => Some(SessionCommand::SaveAndQuit),
+            UiAction::RetrySave => Some(SessionCommand::RetrySave),
+            UiAction::QuitWithoutSaving => Some(SessionCommand::QuitWithoutSaving),
+            UiAction::Back => Some(SessionCommand::Back),
+            UiAction::Quit => Some(SessionCommand::Quit),
+            UiAction::ShowTexturePacks
+            | UiAction::SelectTexturePack(_)
+            | UiAction::TexturePackPage(_)
+            | UiAction::ApplyTexturePack => None,
         }
     }
 }
@@ -67,6 +80,13 @@ struct HotbarSlot(u8);
 
 #[derive(Component)]
 struct SelectedItemText;
+
+#[derive(Resource, Default)]
+struct TexturePackMenuState {
+    selected: String,
+    page: usize,
+    rebuild: bool,
+}
 
 #[derive(Resource, Clone)]
 struct UiFont(FontSource);
@@ -87,10 +107,12 @@ impl Plugin for GameUiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<UiStatus>()
             .init_resource::<WorldCatalogResource>()
+            .init_resource::<TexturePackMenuState>()
             .add_systems(
                 OnEnter(AppState::MainMenu),
                 (spawn_main_menu, autostart_world),
             )
+            .add_systems(OnEnter(AppState::TexturePacks), spawn_texture_pack_menu)
             .add_systems(OnEnter(AppState::WorldSelect), spawn_world_select)
             .add_systems(OnEnter(AppState::LoadingWorld), spawn_loading_screen)
             .add_systems(OnEnter(AppState::Saving), spawn_saving_screen)
@@ -103,6 +125,7 @@ impl Plugin for GameUiPlugin {
                 Update,
                 (
                     handle_actions,
+                    rebuild_texture_pack_menu.after(handle_actions),
                     style_buttons,
                     update_status_text,
                     update_hotbar.run_if(in_state(AppState::Playing)),
@@ -150,6 +173,7 @@ fn spawn_main_menu(mut commands: Commands, ui_font: Res<UiFont>) {
             ));
             spawn_button(root, &font, "NEW WORLD", UiAction::NewWorld);
             spawn_button(root, &font, "LOAD WORLD", UiAction::ShowWorlds);
+            spawn_button(root, &font, "TEXTURE PACKS", UiAction::ShowTexturePacks);
             spawn_button(root, &font, "QUIT", UiAction::Quit);
             spawn_status(root, &font);
         });
@@ -203,6 +227,138 @@ fn spawn_world_select(
                 );
             }
             spawn_button(root, &font, "BACK", UiAction::Back);
+            spawn_status(root, &font);
+        });
+}
+
+fn spawn_texture_pack_menu(
+    mut commands: Commands,
+    ui_font: Res<UiFont>,
+    render_catalog: Res<RenderCatalog>,
+    mut images: ResMut<Assets<Image>>,
+    mut texture_packs: ResMut<TexturePackCatalog>,
+    mut menu: ResMut<TexturePackMenuState>,
+    mut status: ResMut<UiStatus>,
+) {
+    texture_packs.refresh();
+    menu.selected = texture_packs.active_id().to_owned();
+    menu.page = 0;
+    menu.rebuild = false;
+    if !texture_packs.diagnostic.is_empty() {
+        status.0.clone_from(&texture_packs.diagnostic);
+    }
+    set_pack_preview(&render_catalog, &mut images, &texture_packs.active.preview);
+    spawn_texture_pack_menu_view(
+        &mut commands,
+        &ui_font,
+        &render_catalog,
+        &texture_packs,
+        &menu,
+    );
+}
+
+fn rebuild_texture_pack_menu(
+    mut commands: Commands,
+    roots: Query<Entity, With<TexturePackRoot>>,
+    ui_font: Res<UiFont>,
+    render_catalog: Option<Res<RenderCatalog>>,
+    texture_packs: Res<TexturePackCatalog>,
+    mut menu: ResMut<TexturePackMenuState>,
+) {
+    if !menu.rebuild {
+        return;
+    }
+    let Some(render_catalog) = render_catalog else {
+        return;
+    };
+    for entity in &roots {
+        commands.entity(entity).despawn();
+    }
+    let page_count = texture_packs.packs.len().div_ceil(2).max(1);
+    menu.page = menu.page.min(page_count - 1);
+    menu.rebuild = false;
+    spawn_texture_pack_menu_view(
+        &mut commands,
+        &ui_font,
+        &render_catalog,
+        &texture_packs,
+        &menu,
+    );
+}
+
+fn spawn_texture_pack_menu_view(
+    commands: &mut Commands,
+    ui_font: &UiFont,
+    render_catalog: &RenderCatalog,
+    texture_packs: &TexturePackCatalog,
+    menu: &TexturePackMenuState,
+) {
+    const PAGE_SIZE: usize = 2;
+    let font = ui_font.0.clone();
+    let page_count = texture_packs.packs.len().div_ceil(PAGE_SIZE).max(1);
+    let start = menu.page.min(page_count - 1) * PAGE_SIZE;
+    commands
+        .spawn((
+            texture_pack_root_node(),
+            TexturePackRoot,
+            DespawnOnExit(AppState::TexturePacks),
+        ))
+        .with_children(|root| {
+            root.spawn((
+                Text::new("TEXTURE PACKS"),
+                TextFont {
+                    font: font.clone(),
+                    font_size: FontSize::Px(42.0),
+                    ..default()
+                },
+                TextColor(Color::WHITE),
+            ));
+            root.spawn((
+                ImageNode::new(render_catalog.pack_preview.clone()),
+                Node {
+                    width: px(192),
+                    height: px(108),
+                    border: UiRect::all(px(2)),
+                    ..default()
+                },
+                BorderColor::all(Color::srgb(0.38, 0.45, 0.48)),
+            ));
+            for pack in texture_packs.packs.iter().skip(start).take(PAGE_SIZE) {
+                let selected = pack.id == menu.selected;
+                let active = pack.id == texture_packs.active_id();
+                let state = if pack.validation_error.is_some() {
+                    "INVALID"
+                } else if active {
+                    "ACTIVE"
+                } else if selected {
+                    "SELECTED"
+                } else {
+                    "READY"
+                };
+                spawn_compact_button(
+                    root,
+                    &font,
+                    &format!("{} — {} [{state}]", pack.name, pack.author),
+                    UiAction::SelectTexturePack(pack.id.clone()),
+                );
+            }
+            root.spawn((
+                Text::new(format!("PAGE {} / {page_count}", menu.page + 1)),
+                TextFont {
+                    font: font.clone(),
+                    font_size: FontSize::Px(18.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.62, 0.70, 0.74)),
+            ));
+            if menu.page > 0 {
+                spawn_compact_button(root, &font, "PREVIOUS", UiAction::TexturePackPage(-1));
+            }
+            if menu.page + 1 < page_count {
+                spawn_compact_button(root, &font, "NEXT", UiAction::TexturePackPage(1));
+            }
+            spawn_compact_button(root, &font, "APPLY", UiAction::ApplyTexturePack);
+            spawn_compact_button(root, &font, "BACK", UiAction::Back);
             spawn_status(root, &font);
         });
 }
@@ -274,7 +430,7 @@ fn spawn_saving_screen(mut commands: Commands, ui_font: Res<UiFont>) {
         ));
 }
 
-fn spawn_hud(mut commands: Commands, ui_font: Res<UiFont>) {
+fn spawn_hud(mut commands: Commands, ui_font: Res<UiFont>, render_catalog: Res<RenderCatalog>) {
     let font = ui_font.0.clone();
     commands
         .spawn((
@@ -332,15 +488,33 @@ fn spawn_hud(mut commands: Commands, ui_font: Res<UiFont>) {
                                 }),
                                 HotbarSlot(slot),
                             ))
-                            .with_child((
-                                Text::new(slot.to_string()),
-                                TextFont {
-                                    font: font.clone(),
-                                    font_size: FontSize::Px(24.0),
-                                    ..default()
-                                },
-                                TextColor(Color::WHITE),
-                            ));
+                            .with_children(|slot_node| {
+                                slot_node.spawn((
+                                    ImageNode::new(
+                                        render_catalog.hotbar_icons[usize::from(slot - 1)].clone(),
+                                    ),
+                                    Node {
+                                        width: px(32),
+                                        height: px(32),
+                                        ..default()
+                                    },
+                                ));
+                                slot_node.spawn((
+                                    Text::new(slot.to_string()),
+                                    TextFont {
+                                        font: font.clone(),
+                                        font_size: FontSize::Px(16.0),
+                                        ..default()
+                                    },
+                                    TextColor(Color::WHITE),
+                                    Node {
+                                        position_type: PositionType::Absolute,
+                                        right: px(2),
+                                        bottom: px(0),
+                                        ..default()
+                                    },
+                                ));
+                            });
                         }
                     });
             });
@@ -359,6 +533,21 @@ fn root_node(color: Color) -> (Node, BackgroundColor) {
             ..default()
         },
         BackgroundColor(color),
+    )
+}
+
+fn texture_pack_root_node() -> (Node, BackgroundColor) {
+    (
+        Node {
+            width: percent(100),
+            height: percent(100),
+            flex_direction: FlexDirection::Column,
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            row_gap: px(4),
+            ..default()
+        },
+        BackgroundColor(Color::srgb(0.035, 0.050, 0.068)),
     )
 }
 
@@ -394,6 +583,38 @@ fn spawn_button(
         ));
 }
 
+fn spawn_compact_button(
+    parent: &mut ChildSpawnerCommands,
+    font: &FontSource,
+    label: &str,
+    action: UiAction,
+) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                width: px(440),
+                height: px(38),
+                border: UiRect::all(px(2)),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(button_color(Interaction::None)),
+            BorderColor::all(Color::srgb(0.40, 0.48, 0.52)),
+            action,
+        ))
+        .with_child((
+            Text::new(label),
+            TextFont {
+                font: font.clone(),
+                font_size: FontSize::Px(22.0),
+                ..default()
+            },
+            TextColor(Color::WHITE),
+        ));
+}
+
 fn spawn_status(parent: &mut ChildSpawnerCommands, font: &FontSource) {
     parent.spawn((
         Text::new(""),
@@ -407,13 +628,62 @@ fn spawn_status(parent: &mut ChildSpawnerCommands, font: &FontSource) {
     ));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_actions(
     interactions: Query<(&Interaction, &UiAction), Changed<Interaction>>,
     mut messages: MessageWriter<SessionCommand>,
+    mut pack_changes: MessageWriter<TexturePackChanged>,
+    mut next_state: ResMut<NextState<AppState>>,
+    mut texture_packs: ResMut<TexturePackCatalog>,
+    mut menu: ResMut<TexturePackMenuState>,
+    render_catalog: Option<Res<RenderCatalog>>,
+    mut images: ResMut<Assets<Image>>,
+    mut status: ResMut<UiStatus>,
 ) {
     for (interaction, action) in &interactions {
-        if *interaction == Interaction::Pressed {
-            messages.write(action.into());
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        if let Some(command) = action.session_command() {
+            messages.write(command);
+            continue;
+        }
+        match action {
+            UiAction::ShowTexturePacks => {
+                menu.page = 0;
+                next_state.set(AppState::TexturePacks);
+            }
+            UiAction::SelectTexturePack(id) => match texture_packs.resolve(id) {
+                Ok(pack) => {
+                    if let Some(render_catalog) = &render_catalog {
+                        set_pack_preview(render_catalog, &mut images, &pack.preview);
+                    }
+                    menu.selected.clone_from(id);
+                    menu.rebuild = true;
+                    status.0.clear();
+                }
+                Err(error) => status.0 = format!("Could not preview texture pack: {error}"),
+            },
+            UiAction::TexturePackPage(offset) => {
+                menu.page = if *offset < 0 {
+                    menu.page.saturating_sub(offset.unsigned_abs() as usize)
+                } else {
+                    menu.page.saturating_add(*offset as usize)
+                };
+                menu.rebuild = true;
+            }
+            UiAction::ApplyTexturePack => {
+                let selected = menu.selected.clone();
+                match texture_packs.apply(&selected) {
+                    Ok(()) => {
+                        pack_changes.write(TexturePackChanged);
+                        status.0 = format!("Applied {}", texture_packs.active.manifest.name);
+                        menu.rebuild = true;
+                    }
+                    Err(error) => status.0 = format!("Could not apply texture pack: {error}"),
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -468,6 +738,8 @@ fn resume_physics(mut physics_time: ResMut<Time<Physics>>) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn environment_flags_accept_common_enabled_values() {
         for value in ["1", "true", "TRUE", "yes"] {
@@ -476,5 +748,17 @@ mod tests {
                 "1" | "true" | "yes"
             ));
         }
+    }
+
+    #[test]
+    fn texture_pack_actions_stay_out_of_the_world_session() {
+        assert!(UiAction::ShowTexturePacks.session_command().is_none());
+        assert!(
+            UiAction::SelectTexturePack("default".into())
+                .session_command()
+                .is_none()
+        );
+        assert!(UiAction::ApplyTexturePack.session_command().is_none());
+        assert!(UiAction::Back.session_command().is_some());
     }
 }

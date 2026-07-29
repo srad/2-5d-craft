@@ -1,0 +1,32 @@
+schema_version = 1
+id = "default"
+name = "Sidecraft Default"
+author = "Sidecraft"
+description = "Built-in rich, low-resolution Sidecraft texture pack."
+
+[player]
+skin = [
+    174,
+    111,
+    62,
+]
+shirt = [
+    25,
+    91,
+    105,
+]
+pants = [
+    31,
+    40,
+    57,
+]
+hair = [
+    55,
+    29,
+    16,
+]
+details = [
+    27,
+    22,
+    17,
+]

@@ -13,6 +13,7 @@ pub enum AppState {
     #[default]
     Boot,
     MainMenu,
+    TexturePacks,
     WorldSelect,
     LoadingWorld,
     Playing,
@@ -43,6 +44,7 @@ impl Plugin for GamePlugin {
             )
             .add_systems(PostStartup, finish_boot)
             .add_plugins((
+                adapters::bevy::textures::TexturePackPlugin,
                 PhysicsPlugins::default().with_length_unit(1.0),
                 adapters::bevy::rendering::RenderingPlugin,
                 adapters::bevy::world::WorldPlugin,

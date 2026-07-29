@@ -6,6 +6,7 @@ pub(crate) mod player;
 pub(crate) mod rendering;
 pub(crate) mod save;
 pub(crate) mod session;
+pub(crate) mod textures;
 pub(crate) mod ui;
 pub(crate) mod world;
 

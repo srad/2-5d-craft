@@ -1,0 +1,25 @@
+palette = "earthy"
+pattern = "cluster-stamps,cellular-clumps,short-walks"
+placement = "jittered-grid,poisson-disc"
+cluster-shape = "mixed,polyomino"
+cluster-size = "2..5"
+cluster-density = "0.16..0.24"
+smoothing-passes = "0..1"
+contrast = "1.02..1.10"
+saturation = "0.95..1.08"
+lightness = "-0.04..0.01"
+variant-strength = "2..5"
+ore-pattern = "center-growth,branching-walk,compact-cellular"
+ore-coverage = "0.30..0.35"
+ore-branches = "3..6"
+ore-thickness = "2..3"
+ore-center-bias = "0.75..1.0"
+leaf-hole-density = "0.02..0.06"
+grass-fringe-depth = "3..5"
+quality = "balanced"
+
+[material.stone]
+pattern = "cluster-stamps,cellular-clumps"
+
+[material.dirt]
+pattern = "cluster-stamps,short-walks"

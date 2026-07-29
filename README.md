@@ -40,6 +40,7 @@ cargo run
 
 The first build is large because Bevy's rendering stack must be compiled.
 Worlds are stored under `worlds/` relative to the working directory.
+The global texture-pack selection is stored in schema-1 `sidecraft.toml`.
 
 ### Controls
 
@@ -84,12 +85,13 @@ unsupported torches, and blocks overlapping the player.
   20-minute, 24,000-tick day/night cycle with a visible pixel-art sun, stars,
   eight persistent moon phases, stronger cyclic color moods, and cap-emissive
   chunk-batched low-poly floor and wall torches.
-- A runtime-built, guttered 16-by-16-pixel texture atlas with deterministic
-  material variants, closely spaced palettes, connected pixel-art clusters,
-  semantic grass, bark, ring, ore, and leaf motifs, nearest-neighbor block
-  textures, linearly sampled lighting, directional face shading, uniform depth
-  exposure, and bounded depth haze. Individual block faces remain flat-shaded
-  without within-face gradients.
+- A versioned texture-pack pipeline with four 16-by-16 variants per face,
+  closely spaced earthy palettes, connected pixel-art clusters, semantic
+  grass, bark, ring, ore, leaf, bedrock, and torch motifs, environment art,
+  hotbar icons, player colors, partial-pack fallback, validation, previews,
+  and main-menu switching. Nearest-neighbor textures retain linearly sampled
+  lighting, directional face shading, uniform depth exposure, and bounded
+  depth haze.
 - Main menu, world selection, HUD, and pause/save controls. Button actions are
   triggered only by Bevy's `Interaction::Pressed` state.
 - Autosave after changed world data, save on pause, and save-aware window
@@ -123,6 +125,30 @@ Schema 4 is intentionally a fresh format. Legacy JSON metadata saves are
 neither loaded nor migrated. Top-level single-file SCW1 worlds are also
 rejected: schema 4 worlds are package directories only. M2 replaces the
 current save model with exact-schema SCW version 5.
+
+## Texture packs
+
+The complete built-in pack is under `assets/texture-packs/default`. User packs
+are folders under `texture-packs/`; partial packs inherit each missing face,
+icon, environment image, or player color from the default. Select and apply
+packs from `TEXTURE PACKS` on the main menu. Applying validates all CPU assets
+and writes the global config before updating stable render handles.
+
+The generator is a separate publishable package:
+
+```powershell
+cargo run -p sidecraft-textures --
+cargo run -p sidecraft-textures -- generate --seed 42 --pattern short-walks
+cargo run -p sidecraft-textures -- init texture-generator.toml
+cargo run -p sidecraft-textures -- validate texture-packs/generated-42
+```
+
+No generator options produces one randomized safe pack and prints its seed and
+resolved choices. Exact values, comma-separated choices, inclusive ranges,
+recipes, batches, and repeatable `--set material.field=value` overrides are
+supported. See the
+[`sidecraft-textures` package guide](crates/sidecraft-textures/README.md) and
+the [earthy example recipe](crates/sidecraft-textures/recipes/earthy.toml).
 
 ## Architecture
 
