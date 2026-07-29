@@ -258,7 +258,7 @@ mod tests {
     fn block_light_falls_off_across_all_six_neighbors() {
         let blocks = HashMap::from([((1, 1, 1), BlockState::TORCH)]);
         let light = volume(3, 3, 3, &blocks);
-        assert_eq!(light.get(1, 1, 1).block, 12);
+        assert_eq!(light.get(1, 1, 1).block, 14);
         for position in [
             (0, 1, 1),
             (2, 1, 1),
@@ -267,7 +267,7 @@ mod tests {
             (1, 1, 0),
             (1, 1, 2),
         ] {
-            assert_eq!(light.get(position.0, position.1, position.2).block, 11);
+            assert_eq!(light.get(position.0, position.1, position.2).block, 13);
         }
     }
 
@@ -288,7 +288,7 @@ mod tests {
             ((0, 1, 1), BlockState::STONE),
         ]);
         let light = volume(1, 3, 2, &blocks);
-        assert_eq!(light.get(0, 1, 0).block, 12);
+        assert_eq!(light.get(0, 1, 0).block, 14);
         assert_eq!(light.get(0, 1, 1).block, 0);
         assert_eq!(light.get(0, 1, u8::MAX).block, 0);
     }

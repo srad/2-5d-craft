@@ -9,6 +9,7 @@ use crate::{
         session::SessionCommand,
     },
     application::WorldId,
+    domain::BlockState,
 };
 
 #[derive(Component)]
@@ -297,7 +298,7 @@ fn spawn_hud(mut commands: Commands, ui_font: Res<UiFont>) {
             })
             .with_children(|column| {
                 column.spawn((
-                    Text::new("Grass"),
+                    Text::new("Dirt"),
                     TextFont {
                         font: font.clone(),
                         font_size: FontSize::Px(24.0),
@@ -312,7 +313,7 @@ fn spawn_hud(mut commands: Commands, ui_font: Res<UiFont>) {
                         ..default()
                     })
                     .with_children(|bar| {
-                        for slot in 1..=8 {
+                        for slot in 1..=BlockState::HOTBAR.len() as u8 {
                             bar.spawn((
                                 Node {
                                     width: px(48),

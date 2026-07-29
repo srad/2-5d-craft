@@ -47,12 +47,12 @@ application/
     snapshot, repository port, session, streaming, world state, saving
 adapters/
     bevy/       ECS and presentation integrations
-    storage/    schema-3 SCW package repository
+    storage/    schema-4 SCW package repository
 lib.rs          composition root and schedule ordering
 ```
 
 Domain snapshots are schema-neutral and world IDs are path-free. The storage
-adapter maps those values to the current schema-3 package layout. The Bevy
+adapter maps those values to the current schema-4 package layout. The Bevy
 adapter uses thin resource wrappers because Bevy resources must implement its
 ECS component contract; the wrapped domain and application types remain
 framework-independent.
@@ -126,7 +126,7 @@ struct BlockState {
 - Foreground is editable, simulated, rendered, and colliding.
 - Backwall is editable, persistent, rendered, and participates in lighting,
   but never creates player collision.
-- Render depths 2 and 3 are deterministic generator output. They are not
+- Render depths 2 through 5 are deterministic generator output. They are not
   mutable world layers and are not saved.
 - The generator samples a real three-dimensional voxel field using global
   horizontal position, vertical position, and depth. Depths 0 and 1 initialize
@@ -144,9 +144,11 @@ struct BlockState {
   and floating-origin rebasing must share the same transform construction.
 - Camera targets are snapped in camera-view space so the oblique projection
   remains stable at the nearest-neighbor pixel scale.
-- Render depths keep their real voxel positions. Per-depth exposure and haze
-  separate rear scenery without changing generation or making it interactive.
-- Lighting is a derived four-depth volume with independent 0-15 sky and block
+- Render depths keep their real voxel positions. Uniform exposure preserves
+  their block shading, while a bounded multiplicative depth tint separates
+  rear scenery without flattening texture contrast, changing generation, or
+  making it interactive.
+- Lighting is a derived six-depth volume with independent 0-15 sky and block
   channels. Opaque voxels stop propagation; open cells spread light through
   their six orthogonal neighbors without leaking beyond the rendered depth
   bounds.
@@ -155,9 +157,15 @@ struct BlockState {
   Each block face receives one uniform shade; interpolation never creates
   gradients inside a face. Day/night changes update the lightmap rather than
   rebuilding chunk meshes.
+- Block source art is 16 by 16 pixels with closely spaced material palettes and
+  deliberate connected clusters rather than high-frequency procedural noise.
+  Grass, wood, ores, leaves, bedrock, and torches retain material-specific face
+  and motif rules.
 - Ambient occlusion is a subtle quantized multiplier for an entire face.
-  Torch flames and embers animate in their chunk-batched material without
-  changing propagated light or creating per-block render entities.
+  Low-poly floor and wall torches keep emission in a small textured cap within
+  their chunk-batched material. Their propagated level stays static while one
+  shared presentation-only lookup flickers the rendered block light; torches
+  never create per-block render entities.
 - Sun and moon visuals stay camera-aligned and communicate the clock state.
   They do not drive directional PBR lights or cast smooth real-time shadows.
 
@@ -272,7 +280,7 @@ Only the current SCW schema is accepted. A structural change bumps
 `schema_version`, deletes the previous reader and tests, and intentionally
 invalidates existing prototype worlds.
 
-The current schema is exactly version 3:
+The current schema is exactly version 4:
 
 - Every file begins with an `SCW1` envelope.
 - Postcard encodes metadata, palettes, and region references.
@@ -290,9 +298,9 @@ The current schema is exactly version 3:
 - The manifest stores seed, generator version, world dimensions, player state,
   absolute day ticks, and sorted region references.
 
-M2 replaces this prototype layout with exact schema version 4, adding the
+M2 replaces this prototype layout with exact schema version 5, adding the
 persistent backwall, `world_tick`, the next tick sequence, and region-local
-pending scheduled ticks. Schema 3 will be invalidated rather than migrated.
+pending scheduled ticks. Schema 4 will be invalidated rather than migrated.
 
 Magic, schema, framing, decompression, palette, dimensions, ordering, checksum,
 and runtime fields are validated before data enters the domain. Invalid or

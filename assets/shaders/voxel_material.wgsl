@@ -6,19 +6,16 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(3) var lightmap_sampler: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(4) var<uniform> haze_color: vec4<f32>;
 
-fn depth_style(depth: u32) -> vec2<f32> {
+fn depth_haze(depth: u32) -> f32 {
     switch depth {
         case 1u: {
-            return vec2(0.92, 0.12);
+            return 0.12;
         }
         case 2u: {
-            return vec2(0.84, 0.25);
-        }
-        case 3u: {
-            return vec2(0.76, 0.38);
+            return 0.25;
         }
         default: {
-            return vec2(1.0, 0.0);
+            return select(0.0, 0.38, depth >= 3u);
         }
     }
 }
@@ -34,8 +31,10 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
     let block = clamp(mesh.color.g * 15.0, 0.0, 15.0);
     let light_uv = (vec2(block, sky) + vec2(0.5)) / 16.0;
     let light = textureSample(lightmap_texture, lightmap_sampler, light_uv).rgb;
-    let style = depth_style(u32(round(mesh.color.a * 3.0)));
-    let lit = atlas.rgb * light * mesh.color.b;
-    let hazed = mix(lit, haze_color.rgb, style.y) * style.x;
-    return vec4(hazed, atlas.a);
+    let haze = depth_haze(u32(round(mesh.color.a)));
+    let light_peak = max(max(light.r, light.g), light.b);
+    let haze_peak = max(max(haze_color.r, haze_color.g), max(haze_color.b, 0.001));
+    let haze_light = haze_color.rgb * (light_peak / haze_peak);
+    let detailed_light = mix(light, haze_light, haze);
+    return vec4(atlas.rgb * detailed_light * mesh.color.b, atlas.a);
 }

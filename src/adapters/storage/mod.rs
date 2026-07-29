@@ -2,7 +2,7 @@ use crate::application::{
     ChunkSnapshot, InvalidWorldEntry, PlayerSnapshot, RepositoryError, SnapshotError, WorldCatalog,
     WorldId, WorldRepository, WorldSnapshot, WorldSummary, validate_snapshot,
 };
-use crate::domain::{BlockState, CHUNK_WIDTH, WORLD_HEIGHT};
+use crate::domain::{BlockId, BlockState, CHUNK_WIDTH, WORLD_HEIGHT};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
@@ -19,7 +19,7 @@ const CHUNK_AREA: usize = (CHUNK_WIDTH * WORLD_HEIGHT) as usize;
 const MAX_SAVED_CHUNKS_PER_FILE: usize = 65_536;
 const REGION_CHUNKS: i64 = 64;
 const MANIFEST_FILE: &str = "manifest.scw";
-const SAVE_SCHEMA_VERSION: u32 = 3;
+const SAVE_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct ScwMetadataV1 {
@@ -45,46 +45,22 @@ struct ScwHeaderV1 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-enum ScwPaletteBlock {
-    Grass,
-    Dirt,
-    Stone,
-    CoalOre,
-    IronOre,
-    Wood,
-    Leaves,
-    Torch,
-    Bedrock,
+struct ScwPaletteBlock {
+    id: u16,
+    variant: u8,
 }
 
 impl ScwPaletteBlock {
     fn from_code(code: u8) -> Option<Self> {
-        Some(match BlockState::from_code(code)? {
-            BlockState::GRASS => Self::Grass,
-            BlockState::DIRT => Self::Dirt,
-            BlockState::STONE => Self::Stone,
-            BlockState::COAL_ORE => Self::CoalOre,
-            BlockState::IRON_ORE => Self::IronOre,
-            BlockState::WOOD => Self::Wood,
-            BlockState::LEAVES => Self::Leaves,
-            BlockState::TORCH => Self::Torch,
-            BlockState::BEDROCK => Self::Bedrock,
-            _ => return None,
+        let state = BlockState::from_code(code)?;
+        Some(Self {
+            id: state.id().value(),
+            variant: state.variant(),
         })
     }
 
-    const fn code(self) -> u8 {
-        match self {
-            Self::Grass => BlockState::GRASS.code(),
-            Self::Dirt => BlockState::DIRT.code(),
-            Self::Stone => BlockState::STONE.code(),
-            Self::CoalOre => BlockState::COAL_ORE.code(),
-            Self::IronOre => BlockState::IRON_ORE.code(),
-            Self::Wood => BlockState::WOOD.code(),
-            Self::Leaves => BlockState::LEAVES.code(),
-            Self::Torch => BlockState::TORCH.code(),
-            Self::Bedrock => BlockState::BEDROCK.code(),
-        }
+    fn code(self) -> Option<u8> {
+        BlockState::new(BlockId::new(self.id)?, self.variant).map(BlockState::code)
     }
 }
 
@@ -678,7 +654,12 @@ fn save_from_parts(
                         "dense block entry references missing palette index {palette_code}"
                     )));
                 };
-                kind.code()
+                kind.code().ok_or_else(|| {
+                    StoreError::Format(format!(
+                        "palette entry contains invalid block state {}:{}",
+                        kind.id, kind.variant
+                    ))
+                })?
             };
             blocks.push(code);
         }
@@ -792,7 +773,10 @@ mod tests {
         assert_eq!(blocks.len(), CHUNK_AREA);
         assert_eq!(
             header.palette,
-            vec![ScwPaletteBlock::Torch, ScwPaletteBlock::Bedrock]
+            vec![
+                ScwPaletteBlock::from_code(BlockState::TORCH.code()).unwrap(),
+                ScwPaletteBlock::from_code(BlockState::BEDROCK.code()).unwrap(),
+            ]
         );
         assert_eq!(blocks[0], 2);
         assert_eq!(blocks[(2 * CHUNK_WIDTH + 3) as usize], 1);
@@ -927,33 +911,33 @@ mod tests {
     }
 
     #[test]
-    fn schema_three_is_exact_and_older_metadata_is_rejected() {
+    fn schema_four_is_exact_and_older_metadata_is_rejected() {
         let save = blank_snapshot(1, "World".into(), Vec::new(), spawn_for_seed(1), 1);
         let mut metadata = metadata_from_save(&save);
-        assert_eq!(metadata.schema_version, 3);
-        metadata.schema_version = 2;
+        assert_eq!(metadata.schema_version, 4);
+        metadata.schema_version = 3;
         assert!(matches!(
             save_from_metadata(metadata, Vec::new()),
-            Err(StoreError::UnsupportedSchema(2))
+            Err(StoreError::UnsupportedSchema(3))
         ));
     }
 
     #[test]
-    fn schema_three_palette_discriminants_remain_stable() {
-        assert_eq!(postcard::to_allocvec(&ScwPaletteBlock::Grass).unwrap(), [0]);
-        assert_eq!(postcard::to_allocvec(&ScwPaletteBlock::Torch).unwrap(), [7]);
-        assert_eq!(
-            postcard::to_allocvec(&ScwPaletteBlock::Bedrock).unwrap(),
-            [8]
-        );
+    fn schema_four_palette_entries_encode_ids_and_variants() {
+        let grass = ScwPaletteBlock::from_code(BlockState::GRASS.code()).unwrap();
+        let torch = ScwPaletteBlock::from_code(BlockState::TORCH.code()).unwrap();
+        let wall_torch = ScwPaletteBlock::from_code(BlockState::WALL_TORCH_LEFT.code()).unwrap();
+        assert_eq!(postcard::to_allocvec(&grass).unwrap(), [1, 0]);
+        assert_eq!(postcard::to_allocvec(&torch).unwrap(), [8, 0]);
+        assert_eq!(postcard::to_allocvec(&wall_torch).unwrap(), [8, 1]);
     }
 
     #[test]
     fn region_hash_is_separated_by_schema() {
         let chunks = example_save().chunks;
         assert_ne!(
-            hash_region_for_schema(&chunks, 2),
-            hash_region_for_schema(&chunks, 3)
+            hash_region_for_schema(&chunks, 3),
+            hash_region_for_schema(&chunks, 4)
         );
     }
 }

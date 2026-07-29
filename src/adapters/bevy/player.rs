@@ -50,7 +50,8 @@ pub struct Hotbar {
 
 impl Hotbar {
     pub fn selected_state(self) -> BlockState {
-        BlockState::HOTBAR[usize::from(self.selected_slot.saturating_sub(1)).min(7)]
+        let maximum_index = BlockState::HOTBAR.len() - 1;
+        BlockState::HOTBAR[usize::from(self.selected_slot.saturating_sub(1)).min(maximum_index)]
     }
 }
 
@@ -253,7 +254,6 @@ fn read_hotbar_input(
         KeyCode::Digit5,
         KeyCode::Digit6,
         KeyCode::Digit7,
-        KeyCode::Digit8,
     ];
     for (index, key) in keys.into_iter().enumerate() {
         if keyboard.just_pressed(key) {
@@ -460,7 +460,7 @@ mod tests {
 
     #[test]
     fn every_hotbar_slot_maps_to_its_catalog_item() {
-        for slot in 1..=8 {
+        for slot in 1..=BlockState::HOTBAR.len() as u8 {
             let hotbar = Hotbar {
                 selected_slot: slot,
             };

@@ -1,9 +1,13 @@
 use crate::{
     AppState,
-    adapters::bevy::{DayCycleResource, RuntimeSet, lighting::LightingPalette, world::WorldEntity},
+    adapters::bevy::{
+        DayCycleResource, RuntimeSet, configured_autostart_u64, lighting::LightingPalette,
+        world::WorldEntity,
+    },
     domain::{
-        BlockState, CHUNK_WIDTH, ChunkLayer, DEPTH_SLICES, LightCell, LightVolume, MAX_LIGHT_LEVEL,
-        VoxelPos, WORLD_HEIGHT, WorldView, generated_voxel, stable_hash, world_to_chunk,
+        BlockId, BlockState, CHUNK_WIDTH, ChunkLayer, DEPTH_SLICES, LightCell, LightVolume,
+        MAX_LIGHT_LEVEL, TorchMount, VoxelPos, WORLD_HEIGHT, WorldView, generated_voxel,
+        stable_hash, world_to_chunk,
     },
 };
 use avian2d::prelude::*;
@@ -19,7 +23,7 @@ use bevy::render::render_resource::{
 };
 use bevy::shader::{Shader, ShaderRef};
 
-const TEXTURE_SIZE: u32 = 32;
+const TEXTURE_SIZE: u32 = 16;
 const LIGHTMAP_SIZE: u32 = 16;
 const VOXEL_SHADER_HANDLE: Handle<Shader> =
     bevy::asset::uuid_handle!("a42fc7d0-7442-45b1-a797-bbefec330f96");
@@ -31,7 +35,8 @@ const ATLAS_VARIANTS: u32 = 3;
 const FACE_VARIANTS: u32 = 3;
 const GUTTER: u32 = 2;
 const ATLAS_CELL: u32 = TEXTURE_SIZE + GUTTER * 2;
-const ATLAS_TILES: u32 = BlockState::ALL.len() as u32 * ATLAS_VARIANTS * FACE_VARIANTS;
+const ATLAS_TILES: u32 = BlockId::ALL.len() as u32 * ATLAS_VARIANTS * FACE_VARIANTS;
+const TORCH_LIGHT_TINT: [f32; 3] = [1.0, 0.42, 0.08];
 
 #[derive(Resource)]
 pub struct RenderCatalog {
@@ -114,14 +119,29 @@ pub(crate) struct VoxelLightmap {
     image: Handle<Image>,
 }
 
+#[derive(Resource)]
+struct TorchFlicker {
+    elapsed: f32,
+    intensity: f32,
+}
+
+impl Default for TorchFlicker {
+    fn default() -> Self {
+        Self {
+            elapsed: 0.0,
+            intensity: 1.0,
+        }
+    }
+}
+
+#[derive(Resource)]
+struct FixedTorchIntensity(f32);
+
 impl VoxelLightmap {
     pub(crate) fn sample_levels(&self, block: f32, sky: f32) -> LinearRgba {
         sample_lightmap(&self.colors, block, sky)
     }
 }
-
-#[derive(Resource, Default)]
-struct TorchEffectClock(f32);
 
 #[derive(Component)]
 pub struct SelectionOutline;
@@ -130,6 +150,11 @@ pub struct RenderingPlugin;
 
 impl Plugin for RenderingPlugin {
     fn build(&self, app: &mut App) {
+        if let Some(percent) = configured_autostart_u64("SIDECRAFT_TEST_TORCH_INTENSITY_PERCENT")
+            && (92..=108).contains(&percent)
+        {
+            app.insert_resource(FixedTorchIntensity(percent as f32 / 100.0));
+        }
         bevy::asset::load_internal_asset!(
             app,
             VOXEL_SHADER_HANDLE,
@@ -146,11 +171,17 @@ impl Plugin for RenderingPlugin {
             MaterialPlugin::<VoxelMaterial>::default(),
             MaterialPlugin::<TorchMaterial>::default(),
         ))
-        .init_resource::<TorchEffectClock>()
+        .init_resource::<TorchFlicker>()
         .add_systems(Startup, build_catalog)
         .add_systems(
             Update,
-            (update_voxel_lightmap, animate_torch_material)
+            advance_torch_flicker
+                .in_set(RuntimeSet::Clock)
+                .run_if(in_state(AppState::Playing)),
+        )
+        .add_systems(
+            Update,
+            (update_voxel_lightmap, update_torch_material)
                 .in_set(RuntimeSet::Derived)
                 .run_if(in_state(AppState::Playing)),
         );
@@ -170,7 +201,7 @@ fn build_catalog(
     atlas_image.sampler = ImageSampler::nearest();
     let atlas = images.add(atlas_image);
     let palette = LightingPalette::from_day(&day);
-    let lightmap_colors = generate_lightmap(day.daylight(), palette);
+    let lightmap_colors = generate_lightmap(day.daylight(), palette, 1.0);
     let lightmap_bytes = encode_lightmap(&lightmap_colors);
     let lightmap_image = images.add(lightmap_image(lightmap_bytes.clone()));
     let haze_color = LinearRgba::rgb(palette.haze[0], palette.haze[1], palette.haze[2]);
@@ -188,7 +219,7 @@ fn build_catalog(
     });
     let emissive_material = torch_materials.add(TorchMaterial {
         atlas,
-        effects: Vec4::ZERO,
+        effects: Vec4::new(1.0, 0.0, 0.0, 0.0),
     });
     let player_cube = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
     let player_colors = [
@@ -211,8 +242,8 @@ fn build_catalog(
         .collect();
     let selection_mesh = meshes.add(Cuboid::new(1.04, 1.04, 1.04));
     let selection_material = materials.add(StandardMaterial {
-        base_color: Color::srgba(1.0, 0.92, 0.42, 0.18),
-        emissive: LinearRgba::rgb(2.0, 1.4, 0.2),
+        base_color: Color::srgba(1.0, 0.92, 0.42, 0.08),
+        emissive: LinearRgba::rgb(0.08, 0.05, 0.01),
         alpha_mode: AlphaMode::Blend,
         unlit: true,
         cull_mode: None,
@@ -236,18 +267,19 @@ fn build_catalog(
     });
 }
 
-pub(crate) fn update_voxel_lightmap(
+fn update_voxel_lightmap(
     day: Res<DayCycleResource>,
     catalog: Option<Res<RenderCatalog>>,
     mut lightmap: Option<ResMut<VoxelLightmap>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<VoxelMaterial>>,
+    flicker: Res<TorchFlicker>,
 ) {
     let (Some(catalog), Some(lightmap)) = (catalog, lightmap.as_mut()) else {
         return;
     };
     let palette = LightingPalette::from_day(&day);
-    let colors = generate_lightmap(day.daylight(), palette);
+    let colors = generate_lightmap(day.daylight(), palette, flicker.intensity);
     let bytes = encode_lightmap(&colors);
     if bytes != lightmap.bytes {
         if let Some(mut image) = images.get_mut(&lightmap.image) {
@@ -264,19 +296,36 @@ pub(crate) fn update_voxel_lightmap(
     lightmap.colors = colors;
 }
 
-fn animate_torch_material(
+fn advance_torch_flicker(
     time: Res<Time>,
-    mut clock: ResMut<TorchEffectClock>,
+    fixed: Option<Res<FixedTorchIntensity>>,
+    mut flicker: ResMut<TorchFlicker>,
+) {
+    if let Some(fixed) = fixed {
+        flicker.intensity = fixed.0;
+        return;
+    }
+    flicker.elapsed = (flicker.elapsed + time.delta_secs()) % 1_024.0;
+    flicker.intensity = torch_flicker(flicker.elapsed);
+}
+
+fn update_torch_material(
+    flicker: Res<TorchFlicker>,
     catalog: Option<Res<RenderCatalog>>,
     mut materials: ResMut<Assets<TorchMaterial>>,
 ) {
-    clock.0 = (clock.0 + time.delta_secs()) % 1_024.0;
     let Some(catalog) = catalog else {
         return;
     };
     if let Some(mut material) = materials.get_mut(&catalog.emissive_material) {
-        material.effects.x = clock.0;
+        material.effects.x = flicker.intensity;
     }
+}
+
+fn torch_flicker(elapsed: f32) -> f32 {
+    let primary = (std::f32::consts::TAU * elapsed / 2.8).sin() * 0.055;
+    let secondary = (std::f32::consts::TAU * elapsed / 4.6 + 1.3).sin() * 0.025;
+    (1.0 + primary + secondary).clamp(0.92, 1.08)
 }
 
 pub fn spawn_selection_outline(commands: &mut Commands, catalog: &RenderCatalog) {
@@ -298,6 +347,22 @@ enum Face {
     Left,
     Top,
     Bottom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+enum TextureFace {
+    Side,
+    Top,
+    Bottom,
+}
+
+impl TextureFace {
+    const ALL: [Self; FACE_VARIANTS as usize] = [Self::Side, Self::Top, Self::Bottom];
+
+    const fn index(self) -> u32 {
+        self as u32
+    }
 }
 
 impl Face {
@@ -332,11 +397,11 @@ impl Face {
         }
     }
 
-    const fn texture_class(self) -> u32 {
+    const fn texture_face(self) -> TextureFace {
         match self {
-            Self::Top => 1,
-            Self::Right | Self::Left | Self::Bottom => 2,
-            Self::Front | Self::Back => 0,
+            Self::Top => TextureFace::Top,
+            Self::Bottom => TextureFace::Bottom,
+            Self::Front | Self::Back | Self::Right | Self::Left => TextureFace::Side,
         }
     }
 
@@ -397,7 +462,7 @@ impl FaceVertexLight {
             self.sky / f32::from(MAX_LIGHT_LEVEL),
             self.block / f32::from(MAX_LIGHT_LEVEL),
             self.shade,
-            f32::from(depth) / f32::from(DEPTH_SLICES - 1),
+            f32::from(depth),
         ]
     }
 }
@@ -443,10 +508,9 @@ pub fn build_chunk_meshes(
                     y,
                     u64::from(state.id().value()) + u64::from(depth) * 97,
                 ) % 3) as u32;
-                if state == BlockState::TORCH {
+                if let Some(mount) = state.torch_mount() {
                     if depth == 0 {
-                        let effect_seed = stable_hash(seed, global_x, y, 0x54_4f_52_43_48);
-                        emissive.push_torch(local_x as f32, y as f32, variant, effect_seed);
+                        emissive.push_torch(local_x as f32, y as f32, variant, mount);
                     }
                     continue;
                 }
@@ -458,7 +522,7 @@ pub fn build_chunk_meshes(
                 for face in Face::ALL {
                     let (dx, dy, dd) = face.neighbor();
                     if voxel_at(global_x + i64::from(dx), y + dy, i32::from(depth) + dd)
-                        .is_some_and(|neighbor| neighbor != BlockState::TORCH)
+                        .is_some_and(|neighbor| neighbor.torch_mount().is_none())
                     {
                         continue;
                     }
@@ -738,7 +802,8 @@ impl VoxelMeshBuilder {
                 [x, y, front],
             ],
         };
-        let tile = ((u32::from(state.id().value()) - 1) * FACE_VARIANTS + face.texture_class())
+        let tile = ((u32::from(state.id().value()) - 1) * FACE_VARIANTS
+            + face.texture_face().index())
             * ATLAS_VARIANTS
             + variant;
         let colors = lighting.map(|sample| sample.encoded(depth));
@@ -783,77 +848,100 @@ struct TorchMeshBuilder {
 }
 
 impl TorchMeshBuilder {
-    fn push_torch(&mut self, x: f32, y: f32, variant: u32, effect_seed: u64) {
+    fn push_torch(&mut self, x: f32, y: f32, variant: u32, mount: TorchMount) {
         let tile = ((u32::from(BlockState::TORCH.id().value()) - 1) * FACE_VARIANTS)
             * ATLAS_VARIANTS
             + variant;
-        let phase = (effect_seed & 0xffff) as f32 / u16::MAX as f32 * std::f32::consts::TAU;
-        let intensity = 0.9 + ((effect_seed >> 16) & 0xff) as f32 / 255.0 * 0.2;
-        let stem_effect = [0.0, phase, 0.0, intensity];
-        self.push_quad(
-            [
-                [x + 0.43, y + 0.05, 0.06],
-                [x + 0.57, y + 0.05, 0.06],
-                [x + 0.57, y + 0.72, 0.06],
-                [x + 0.43, y + 0.72, 0.06],
-            ],
-            tile_uvs(tile),
-            stem_effect,
-        );
-        self.push_quad(
-            [
-                [x + 0.5, y + 0.05, -0.01],
-                [x + 0.5, y + 0.05, 0.13],
-                [x + 0.5, y + 0.72, 0.13],
-                [x + 0.5, y + 0.72, -0.01],
-            ],
-            tile_uvs(tile),
-            stem_effect,
-        );
+        let (base, direction) = match mount {
+            TorchMount::Floor => (Vec2::new(x + 0.5, y + 0.05), Vec2::new(0.0, 0.625)),
+            TorchMount::WallLeft => {
+                let angle = std::f32::consts::FRAC_PI_8;
+                (
+                    Vec2::new(x + 0.94, y + 0.25),
+                    Vec2::new(-angle.sin(), angle.cos()) * 0.625,
+                )
+            }
+            TorchMount::WallRight => {
+                let angle = std::f32::consts::FRAC_PI_8;
+                (
+                    Vec2::new(x + 0.06, y + 0.25),
+                    Vec2::new(angle.sin(), angle.cos()) * 0.625,
+                )
+            }
+        };
+        let top = base + direction;
+        let perpendicular = Vec2::new(-direction.y, direction.x).normalize() * 0.0625;
+        let lower_left = base + perpendicular;
+        let lower_right = base - perpendicular;
+        let upper_left = top + perpendicular;
+        let upper_right = top - perpendicular;
+        let front = 0.1225;
+        let back = -0.0025;
+        let side_uvs = tile_uvs(tile);
+        let vertical_data = [
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+        ];
 
-        let flame_effect = [1.0, phase, 0.0, intensity];
         self.push_quad(
             [
-                [x + 0.39, y + 0.64, 0.065],
-                [x + 0.61, y + 0.64, 0.065],
-                [x + 0.61, y + 0.94, 0.065],
-                [x + 0.39, y + 0.94, 0.065],
+                [lower_left.x, lower_left.y, front],
+                [lower_right.x, lower_right.y, front],
+                [upper_right.x, upper_right.y, front],
+                [upper_left.x, upper_left.y, front],
             ],
-            unit_uvs(),
-            flame_effect,
+            side_uvs,
+            vertical_data,
         );
         self.push_quad(
             [
-                [x + 0.5, y + 0.64, -0.045],
-                [x + 0.5, y + 0.64, 0.175],
-                [x + 0.5, y + 0.94, 0.175],
-                [x + 0.5, y + 0.94, -0.045],
+                [lower_right.x, lower_right.y, back],
+                [lower_left.x, lower_left.y, back],
+                [upper_left.x, upper_left.y, back],
+                [upper_right.x, upper_right.y, back],
             ],
-            unit_uvs(),
-            flame_effect,
+            side_uvs,
+            vertical_data,
         );
-
-        for (index, drift) in [(-1.0, -0.035), (1.0, 0.035)] {
-            let center_x = x + 0.5 + drift;
-            let ember_phase = phase + index * 1.91;
-            self.push_quad(
-                [
-                    [center_x - 0.03, y + 0.92, 0.07],
-                    [center_x + 0.03, y + 0.92, 0.07],
-                    [center_x + 0.03, y + 0.98, 0.07],
-                    [center_x - 0.03, y + 0.98, 0.07],
-                ],
-                unit_uvs(),
-                [2.0, ember_phase, index, intensity],
-            );
-        }
+        self.push_quad(
+            [
+                [lower_right.x, lower_right.y, front],
+                [lower_right.x, lower_right.y, back],
+                [upper_right.x, upper_right.y, back],
+                [upper_right.x, upper_right.y, front],
+            ],
+            side_uvs,
+            vertical_data,
+        );
+        self.push_quad(
+            [
+                [lower_left.x, lower_left.y, back],
+                [lower_left.x, lower_left.y, front],
+                [upper_left.x, upper_left.y, front],
+                [upper_left.x, upper_left.y, back],
+            ],
+            side_uvs,
+            vertical_data,
+        );
+        self.push_quad(
+            [
+                [upper_left.x, upper_left.y, front],
+                [upper_right.x, upper_right.y, front],
+                [upper_right.x, upper_right.y, back],
+                [upper_left.x, upper_left.y, back],
+            ],
+            tile_region_uvs(tile, 0, 4),
+            [[1.0, 0.0, 0.0, 0.0]; 4],
+        );
     }
 
-    fn push_quad(&mut self, corners: [[f32; 3]; 4], uvs: [[f32; 2]; 4], effect: [f32; 4]) {
+    fn push_quad(&mut self, corners: [[f32; 3]; 4], uvs: [[f32; 2]; 4], effects: [[f32; 4]; 4]) {
         let base = self.positions.len() as u32;
         self.positions.extend_from_slice(&corners);
         self.uvs.extend_from_slice(&uvs);
-        self.effects.extend_from_slice(&[effect; 4]);
+        self.effects.extend_from_slice(&effects);
         self.indices
             .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
@@ -870,17 +958,17 @@ impl TorchMeshBuilder {
     }
 }
 
-fn unit_uvs() -> [[f32; 2]; 4] {
-    [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]
+fn tile_uvs(tile: u32) -> [[f32; 2]; 4] {
+    tile_region_uvs(tile, 0, TEXTURE_SIZE)
 }
 
-fn tile_uvs(tile: u32) -> [[f32; 2]; 4] {
+fn tile_region_uvs(tile: u32, top: u32, bottom: u32) -> [[f32; 2]; 4] {
     let atlas_width = (ATLAS_TILES * ATLAS_CELL) as f32;
     let start = tile * ATLAS_CELL + GUTTER;
     let u0 = start as f32 / atlas_width;
     let u1 = (start + TEXTURE_SIZE) as f32 / atlas_width;
-    let v0 = GUTTER as f32 / ATLAS_CELL as f32;
-    let v1 = (GUTTER + TEXTURE_SIZE) as f32 / ATLAS_CELL as f32;
+    let v0 = (GUTTER + top) as f32 / ATLAS_CELL as f32;
+    let v1 = (GUTTER + bottom) as f32 / ATLAS_CELL as f32;
     [[u0, v1], [u1, v1], [u1, v0], [u0, v0]]
 }
 
@@ -896,11 +984,12 @@ fn classic_brightness(level: f32) -> f32 {
 fn generate_lightmap(
     daylight: f32,
     palette: LightingPalette,
+    block_intensity: f32,
 ) -> [LinearRgba; (LIGHTMAP_SIZE * LIGHTMAP_SIZE) as usize] {
     let daylight = daylight.clamp(0.0, 1.0);
     let global_sky_level = 4.0 + daylight * 11.0;
     let sky_tint = palette.skylight;
-    let block_tint = [1.0, 0.58, 0.22];
+    let block_tint = TORCH_LIGHT_TINT;
     std::array::from_fn(|index| {
         let block = (index % LIGHTMAP_SIZE as usize) as u8;
         let sky = (index / LIGHTMAP_SIZE as usize) as u8;
@@ -909,7 +998,7 @@ fn generate_lightmap(
         let block_brightness = if block == 0 {
             0.0
         } else {
-            classic_brightness(f32::from(block))
+            classic_brightness(f32::from(block)) * block_intensity
         };
         LinearRgba::rgb(
             (sky_brightness * sky_tint[0]).max(block_brightness * block_tint[0]),
@@ -987,10 +1076,12 @@ fn lightmap_image(bytes: Vec<u8>) -> Image {
 fn atlas_image() -> Image {
     let width = ATLAS_TILES * ATLAS_CELL;
     let mut pixels = vec![0; (width * ATLAS_CELL * 4) as usize];
-    for (state_index, state) in BlockState::ALL.into_iter().enumerate() {
-        for face in 0..FACE_VARIANTS {
+    for (state_index, id) in BlockId::ALL.into_iter().enumerate() {
+        let state = BlockState::from_id(id);
+        for face in TextureFace::ALL {
             for variant in 0..ATLAS_VARIANTS {
-                let tile = (state_index as u32 * FACE_VARIANTS + face) * ATLAS_VARIANTS + variant;
+                let tile =
+                    (state_index as u32 * FACE_VARIANTS + face.index()) * ATLAS_VARIANTS + variant;
                 let source = if state == BlockState::TORCH {
                     torch_pixels()
                 } else {
@@ -1023,56 +1114,220 @@ fn atlas_image() -> Image {
     )
 }
 
-fn palette(state: BlockState) -> ([u8; 3], [u8; 3]) {
-    match state {
-        BlockState::GRASS => ([86, 142, 48], [45, 92, 32]),
-        BlockState::DIRT => ([128, 83, 48], [82, 48, 29]),
-        BlockState::STONE => ([110, 114, 119], [66, 70, 76]),
-        BlockState::COAL_ORE => ([93, 96, 101], [22, 24, 29]),
-        BlockState::IRON_ORE => ([112, 104, 94], [197, 124, 78]),
-        BlockState::WOOD => ([137, 88, 40], [72, 43, 22]),
-        BlockState::LEAVES => ([54, 132, 52], [25, 76, 35]),
-        BlockState::BEDROCK => ([55, 58, 64], [20, 22, 27]),
-        BlockState::TORCH => ([224, 126, 28], [255, 221, 91]),
-        _ => unreachable!("all valid block states have a palette"),
+const GRASS_COLORS: [[u8; 3]; 4] = [[48, 101, 35], [60, 116, 38], [75, 132, 43], [91, 146, 49]];
+const DIRT_COLORS: [[u8; 3]; 4] = [[94, 62, 41], [109, 73, 47], [125, 87, 58], [140, 101, 70]];
+const STONE_COLORS: [[u8; 3]; 4] = [
+    [88, 90, 93],
+    [102, 104, 107],
+    [116, 118, 120],
+    [132, 133, 135],
+];
+const COAL_COLORS: [[u8; 3]; 3] = [[35, 36, 39], [48, 50, 54], [63, 65, 70]];
+const IRON_COLORS: [[u8; 3]; 3] = [[126, 82, 57], [155, 105, 76], [184, 133, 98]];
+const BARK_COLORS: [[u8; 3]; 4] = [[73, 43, 23], [91, 54, 28], [111, 69, 36], [134, 87, 46]];
+const WOOD_RING_COLORS: [[u8; 3]; 4] = [[96, 59, 29], [118, 76, 38], [143, 98, 52], [164, 119, 67]];
+const LEAF_COLORS: [[u8; 3]; 4] = [[30, 79, 31], [39, 96, 36], [49, 113, 41], [62, 130, 48]];
+const BEDROCK_COLORS: [[u8; 3]; 4] = [[29, 30, 33], [42, 44, 48], [56, 58, 63], [72, 74, 79]];
+
+const CLUSTER_PATTERN: [[usize; 8]; 8] = [
+    [2, 2, 2, 1, 1, 2, 2, 3],
+    [2, 1, 1, 1, 2, 2, 3, 3],
+    [2, 1, 2, 2, 2, 2, 3, 2],
+    [0, 0, 2, 2, 3, 3, 2, 2],
+    [0, 2, 2, 2, 3, 2, 2, 1],
+    [0, 0, 2, 2, 2, 2, 1, 1],
+    [2, 2, 2, 1, 1, 2, 2, 2],
+    [3, 3, 2, 1, 2, 2, 2, 3],
+];
+
+fn clustered_color(
+    colors: &[[u8; 3]; 4],
+    seed: u64,
+    x: u32,
+    y: u32,
+    variant: u8,
+    face: TextureFace,
+    scale: u32,
+) -> [u8; 3] {
+    let shifted_x = (x + u32::from(variant) * 3 + face.index() * 5) % TEXTURE_SIZE;
+    let shifted_y = (y + u32::from(variant) * 5 + face.index() * 3) % TEXTURE_SIZE;
+    let mut pattern_x = ((shifted_x / scale) % 8) as usize;
+    let mut pattern_y = ((shifted_y / scale) % 8) as usize;
+    if seed & 1 != 0 {
+        std::mem::swap(&mut pattern_x, &mut pattern_y);
+    }
+    if seed & 2 != 0 {
+        pattern_x = 7 - pattern_x;
+    }
+    if seed & 4 != 0 {
+        pattern_y = 7 - pattern_y;
+    }
+    colors[CLUSTER_PATTERN[pattern_y][pattern_x]]
+}
+
+fn grass_color(x: u32, y: u32, variant: u8, face: TextureFace) -> [u8; 3] {
+    clustered_color(&GRASS_COLORS, 0x6a51, x, y, variant, face, 2)
+}
+
+fn dirt_color(x: u32, y: u32, variant: u8, face: TextureFace) -> [u8; 3] {
+    clustered_color(&DIRT_COLORS, 0xd17, x, y, variant, face, 2)
+}
+
+fn stone_color(x: u32, y: u32, variant: u8, face: TextureFace) -> [u8; 3] {
+    clustered_color(&STONE_COLORS, 0x570, x, y, variant, face, 2)
+}
+
+fn ore_color(
+    stone: [u8; 3],
+    ore_colors: &[[u8; 3]; 3],
+    x: u32,
+    y: u32,
+    variant: u8,
+    face: TextureFace,
+) -> [u8; 3] {
+    const ORE_PIXELS: [(u32, u32, usize); 20] = [
+        (2, 2, 0),
+        (3, 2, 1),
+        (3, 3, 2),
+        (4, 3, 0),
+        (10, 1, 0),
+        (11, 1, 1),
+        (11, 2, 2),
+        (12, 2, 0),
+        (7, 7, 0),
+        (8, 7, 1),
+        (8, 8, 2),
+        (9, 8, 1),
+        (9, 9, 0),
+        (12, 11, 0),
+        (13, 11, 1),
+        (12, 12, 2),
+        (13, 13, 1),
+        (14, 13, 0),
+        (2, 12, 0),
+        (3, 12, 1),
+    ];
+    let shifted_x = (x + u32::from(variant) * 5 + face.index() * 3) % TEXTURE_SIZE;
+    let shifted_y = (y + u32::from(variant) * 3 + face.index() * 5) % TEXTURE_SIZE;
+
+    for (ore_x, ore_y, index) in ORE_PIXELS {
+        if shifted_x == ore_x && shifted_y == ore_y {
+            return ore_colors[index];
+        }
+    }
+    stone
+}
+
+fn wood_color(x: u32, y: u32, variant: u8, face: TextureFace) -> [u8; 3] {
+    if matches!(face, TextureFace::Top | TextureFace::Bottom) {
+        let center = (TEXTURE_SIZE as i32 - 1) / 2;
+        let ring = (x as i32 - center).abs().max((y as i32 - center).abs()) as u32;
+        let index = ((ring + u32::from(variant)) % 4) as usize;
+        return WOOD_RING_COLORS[index];
+    }
+
+    let shifted_x = (x + u32::from(variant) * 3) % TEXTURE_SIZE;
+    let shifted_y = (y + u32::from(variant) * 5) % TEXTURE_SIZE;
+    let mut index = match shifted_x {
+        0..=1 => 1,
+        2..=4 => 2,
+        5 => 0,
+        6..=8 => 2,
+        9..=10 => 3,
+        11 => 1,
+        12..=14 => 2,
+        _ => 1,
+    };
+    if matches!(
+        (shifted_x, shifted_y),
+        (2, 6) | (3, 6) | (9, 3) | (10, 3) | (12, 11) | (13, 11)
+    ) {
+        index = 1;
+    }
+    let knot_x = 5 + (u32::from(variant) * 4) % 7;
+    let knot_y = 4 + (u32::from(variant) * 5) % 8;
+    let knot_distance = (x as i32 - knot_x as i32).abs() + (y as i32 - knot_y as i32).abs();
+    if knot_distance <= 1 {
+        index = 0;
+    }
+    BARK_COLORS[index]
+}
+
+fn leaf_pixel(x: u32, y: u32, variant: u8, face: TextureFace) -> ([u8; 3], u8) {
+    let color = clustered_color(&LEAF_COLORS, 0x1eaf, x, y, variant, face, 2);
+    let shifted_x = (x + u32::from(variant) * 3 + face.index() * 2) % TEXTURE_SIZE;
+    let shifted_y = (y + u32::from(variant) * 5 + face.index() * 3) % TEXTURE_SIZE;
+    let transparent = matches!(
+        (shifted_x, shifted_y),
+        (1, 2) | (2, 2) | (10, 3) | (6, 10) | (13, 13) | (4, 14)
+    );
+    (color, if transparent { 0 } else { 255 })
+}
+
+fn torch_color(x: u32, y: u32) -> [u8; 3] {
+    if y < TEXTURE_SIZE / 4 {
+        let center_distance = (x as i32 - 7).abs();
+        match (y, center_distance, (x + y) % 4) {
+            (0, 0..=2, _) => [255, 238, 135],
+            (_, 0..=3, 0..=1) => [255, 204, 67],
+            (_, _, 0) => [229, 87, 20],
+            _ => [247, 139, 26],
+        }
+    } else {
+        let band = (x / 3 + y / 5) % 4;
+        match (x == 0 || x == TEXTURE_SIZE - 1, band) {
+            (true, _) => [67, 34, 18],
+            (false, 0) => [92, 48, 23],
+            (false, 1) => [119, 66, 29],
+            (false, 2) => [147, 85, 36],
+            (false, _) => [104, 55, 25],
+        }
     }
 }
 
 #[cfg(test)]
 pub fn block_pixels(state: BlockState, variant: u8) -> Vec<u8> {
-    block_face_pixels(state, variant, 0)
+    block_face_pixels(state, variant, TextureFace::Side)
 }
 
-fn block_face_pixels(state: BlockState, variant: u8, face: u32) -> Vec<u8> {
-    let (base, accent) = palette(state);
+fn block_face_pixels(state: BlockState, variant: u8, face: TextureFace) -> Vec<u8> {
     let mut pixels = Vec::with_capacity((TEXTURE_SIZE * TEXTURE_SIZE * 4) as usize);
     for y in 0..TEXTURE_SIZE {
         for x in 0..TEXTURE_SIZE {
-            let hash = stable_hash(
-                u64::from(variant) + u64::from(face) * 131,
-                i64::from(x),
-                y as i32,
-                u64::from(state.id().value()) + 700,
-            );
-            let edge = x == 0 || y == 0 || x == TEXTURE_SIZE - 1 || y == TEXTURE_SIZE - 1;
-            let grass_blade = state == BlockState::GRASS
-                && ((face == 1 && hash % 7 < 3) || (face != 1 && y < 6 && hash % 5 < 3));
-            let wood_grain = state == BlockState::WOOD
-                && if face == 1 {
-                    ((x as i32 - 16).pow(2) + (y as i32 - 16).pow(2)) % 17 < 4
-                } else {
-                    (x + u32::from(variant) * 3) % 9 < 2
-                };
-            let use_accent = edge || hash.is_multiple_of(13) || grass_blade || wood_grain;
-            let mut color = if use_accent { accent } else { base };
-            let variation = (hash % 17) as i16 - 8;
-            for channel in &mut color {
-                *channel = (i16::from(*channel) + variation).clamp(0, 255) as u8;
-            }
-            let alpha = if state == BlockState::LEAVES && hash.is_multiple_of(19) {
-                0
-            } else {
-                255
+            let (color, alpha) = match state {
+                BlockState::GRASS => match face {
+                    TextureFace::Top => (grass_color(x, y, variant, face), 255),
+                    TextureFace::Bottom => (dirt_color(x, y, variant, face), 255),
+                    TextureFace::Side => {
+                        const GRASS_FRINGE: [u32; 16] =
+                            [4, 4, 3, 5, 4, 3, 6, 4, 4, 5, 3, 4, 6, 3, 5, 4];
+                        let fringe_x = (x + u32::from(variant) * 3) as usize % GRASS_FRINGE.len();
+                        let grass_depth = GRASS_FRINGE[fringe_x];
+                        if y < grass_depth {
+                            (grass_color(x, y, variant, face), 255)
+                        } else {
+                            (dirt_color(x, y, variant, face), 255)
+                        }
+                    }
+                },
+                BlockState::DIRT => (dirt_color(x, y, variant, face), 255),
+                BlockState::STONE => (stone_color(x, y, variant, face), 255),
+                BlockState::COAL_ORE => {
+                    let stone = stone_color(x, y, variant, face);
+                    (ore_color(stone, &COAL_COLORS, x, y, variant, face), 255)
+                }
+                BlockState::IRON_ORE => {
+                    let stone = stone_color(x, y, variant, face);
+                    (ore_color(stone, &IRON_COLORS, x, y, variant, face), 255)
+                }
+                BlockState::WOOD => (wood_color(x, y, variant, face), 255),
+                BlockState::LEAVES => leaf_pixel(x, y, variant, face),
+                BlockState::BEDROCK => (
+                    clustered_color(&BEDROCK_COLORS, 0xbed, x, y, variant, face, 2),
+                    255,
+                ),
+                BlockState::TORCH => (torch_color(x, y), 255),
+                _ => unreachable!("all valid block states have generated texture art"),
             };
             pixels.extend_from_slice(&[color[0], color[1], color[2], alpha]);
         }
@@ -1081,23 +1336,14 @@ fn block_face_pixels(state: BlockState, variant: u8, face: u32) -> Vec<u8> {
 }
 
 pub fn torch_pixels() -> Vec<u8> {
-    let mut pixels = vec![0; (TEXTURE_SIZE * TEXTURE_SIZE * 4) as usize];
-    for y in 1_u32..31 {
-        for x in 13_u32..19 {
-            let color = if (x + y).is_multiple_of(7) {
-                [151, 89, 34, 255]
-            } else {
-                [104, 58, 24, 255]
-            };
-            set_pixel(&mut pixels, x, y, color);
+    let mut pixels = Vec::with_capacity((TEXTURE_SIZE * TEXTURE_SIZE * 4) as usize);
+    for y in 0..TEXTURE_SIZE {
+        for x in 0..TEXTURE_SIZE {
+            let color = torch_color(x, y);
+            pixels.extend_from_slice(&[color[0], color[1], color[2], 255]);
         }
     }
     pixels
-}
-
-fn set_pixel(pixels: &mut [u8], x: u32, y: u32, color: [u8; 4]) {
-    let index = ((y * TEXTURE_SIZE + x) * 4) as usize;
-    pixels[index..index + 4].copy_from_slice(&color);
 }
 
 #[cfg(test)]
@@ -1117,8 +1363,8 @@ mod tests {
     }
 
     #[test]
-    fn generated_texture_tiles_are_deterministic_and_detailed() {
-        assert_eq!(block_pixels(BlockState::DIRT, 1).len(), 32 * 32 * 4);
+    fn generated_texture_tiles_are_low_resolution_and_deterministic() {
+        assert_eq!(block_pixels(BlockState::DIRT, 1).len(), 16 * 16 * 4);
         assert_eq!(
             block_pixels(BlockState::DIRT, 1),
             block_pixels(BlockState::DIRT, 1)
@@ -1128,8 +1374,73 @@ mod tests {
             block_pixels(BlockState::DIRT, 2)
         );
         let alphas: Vec<_> = torch_pixels().iter().skip(3).step_by(4).copied().collect();
-        assert!(alphas.contains(&0));
-        assert!(alphas.contains(&255));
+        assert!(alphas.iter().all(|alpha| *alpha == 255));
+        let leaf_alphas: Vec<_> = block_pixels(BlockState::LEAVES, 1)
+            .iter()
+            .skip(3)
+            .step_by(4)
+            .copied()
+            .collect();
+        assert!(leaf_alphas.contains(&0));
+        assert!(leaf_alphas.contains(&255));
+        assert_ne!(
+            &torch_pixels()[..4],
+            &torch_pixels()[TEXTURE_SIZE as usize * 8 * 4..][..4]
+        );
+    }
+
+    #[test]
+    fn grass_uses_grass_top_dirt_bottom_and_quarter_height_side_cap() {
+        let top = block_face_pixels(BlockState::GRASS, 0, TextureFace::Top);
+        let side = block_face_pixels(BlockState::GRASS, 0, TextureFace::Side);
+        let bottom = block_face_pixels(BlockState::GRASS, 0, TextureFace::Bottom);
+        let pixel = |pixels: &[u8], x: u32, y: u32| {
+            let index = ((y * TEXTURE_SIZE + x) * 4) as usize;
+            [pixels[index], pixels[index + 1], pixels[index + 2]]
+        };
+        let uses_palette = |color: [u8; 3], colors: &[[u8; 3]; 4]| colors.contains(&color);
+
+        for y in 0..TEXTURE_SIZE {
+            for x in 0..TEXTURE_SIZE {
+                assert!(uses_palette(pixel(&top, x, y), &GRASS_COLORS));
+                assert!(uses_palette(pixel(&bottom, x, y), &DIRT_COLORS));
+                let side_color = pixel(&side, x, y);
+                if y < 3 {
+                    assert!(uses_palette(side_color, &GRASS_COLORS));
+                } else if y < 6 {
+                    assert!(
+                        uses_palette(side_color, &GRASS_COLORS)
+                            || uses_palette(side_color, &DIRT_COLORS)
+                    );
+                } else {
+                    assert!(uses_palette(side_color, &DIRT_COLORS));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn generated_materials_use_clustered_multi_tone_art() {
+        let unique_colors = |pixels: Vec<u8>| {
+            pixels
+                .chunks_exact(4)
+                .filter(|pixel| pixel[3] != 0)
+                .map(|pixel| [pixel[0], pixel[1], pixel[2]])
+                .collect::<std::collections::HashSet<_>>()
+        };
+
+        assert!(unique_colors(block_pixels(BlockState::DIRT, 0)).len() >= 4);
+        assert!(unique_colors(block_pixels(BlockState::STONE, 0)).len() >= 4);
+        assert!(unique_colors(block_pixels(BlockState::COAL_ORE, 0)).len() >= 6);
+        assert!(unique_colors(block_pixels(BlockState::IRON_ORE, 0)).len() >= 6);
+        assert!(unique_colors(block_pixels(BlockState::WOOD, 0)).len() >= 4);
+        assert!(unique_colors(block_pixels(BlockState::LEAVES, 0)).len() >= 4);
+        assert!(unique_colors(block_pixels(BlockState::BEDROCK, 0)).len() >= 4);
+
+        assert_ne!(
+            block_face_pixels(BlockState::WOOD, 0, TextureFace::Top),
+            block_face_pixels(BlockState::WOOD, 0, TextureFace::Side)
+        );
     }
 
     #[test]
@@ -1200,11 +1511,11 @@ mod tests {
     fn lightmap_keeps_sky_and_block_channels_distinct() {
         let noon_day = crate::domain::DayCycle::from_ticks(6_000);
         let midnight_day = crate::domain::DayCycle::from_ticks(18_000);
-        let noon = generate_lightmap(1.0, LightingPalette::from_day(&noon_day));
-        let midnight = generate_lightmap(0.0, LightingPalette::from_day(&midnight_day));
+        let noon = generate_lightmap(1.0, LightingPalette::from_day(&noon_day), 1.0);
+        let midnight = generate_lightmap(0.0, LightingPalette::from_day(&midnight_day), 1.0);
         let full_sky = noon[lightmap_index(0, 15)];
         let night_sky = midnight[lightmap_index(0, 15)];
-        let torch = midnight[lightmap_index(12, 0)];
+        let torch = midnight[lightmap_index(14, 0)];
         assert!(full_sky.red > night_sky.red);
         assert!(torch.red > torch.green);
         assert!(torch.green > torch.blue);
@@ -1224,16 +1535,16 @@ mod tests {
     }
 
     #[test]
-    fn torch_effect_mesh_is_batched_and_phases_are_deterministic() {
+    fn torch_mesh_is_a_compact_cuboid_with_an_emissive_cap() {
         let mut first = TorchMeshBuilder::default();
-        first.push_torch(2.0, 3.0, 0, 42);
+        first.push_torch(2.0, 3.0, 0, TorchMount::Floor);
         let first = first.finish();
         let mut second = TorchMeshBuilder::default();
-        second.push_torch(2.0, 3.0, 0, 42);
+        second.push_torch(2.0, 3.0, 0, TorchMount::Floor);
         let second = second.finish();
 
-        assert_eq!(first.count_vertices(), 24);
-        assert_eq!(first.indices().unwrap().len(), 36);
+        assert_eq!(first.count_vertices(), 20);
+        assert_eq!(first.indices().unwrap().len(), 30);
         let Some(bevy::mesh::VertexAttributeValues::Float32x4(first_effects)) =
             first.attribute(ATTRIBUTE_TORCH_EFFECT)
         else {
@@ -1245,6 +1556,53 @@ mod tests {
             panic!("torch effect attribute must be float32x4");
         };
         assert_eq!(first_effects, second_effects);
+        assert!(first_effects.iter().any(|effect| effect[0] == 0.0));
+        assert!(first_effects.iter().any(|effect| effect[0] == 1.0));
+    }
+
+    #[test]
+    fn wall_torch_meshes_are_mirrored_and_lean_away_from_support() {
+        let mut left = TorchMeshBuilder::default();
+        left.push_torch(0.0, 0.0, 0, TorchMount::WallLeft);
+        let left = left.finish();
+        let mut right = TorchMeshBuilder::default();
+        right.push_torch(0.0, 0.0, 0, TorchMount::WallRight);
+        let right = right.finish();
+        let left_positions = left
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .unwrap()
+            .as_float3()
+            .unwrap();
+        let right_positions = right
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .unwrap()
+            .as_float3()
+            .unwrap();
+
+        for left in left_positions {
+            assert!(right_positions.iter().any(|right| {
+                (left[0] + right[0] - 1.0).abs() < 0.0001
+                    && (left[1] - right[1]).abs() < 0.0001
+                    && (left[2] - right[2]).abs() < 0.0001
+            }));
+        }
+        let left_base_x = (left_positions[0][0] + left_positions[1][0]) * 0.5;
+        let left_top_x = (left_positions[2][0] + left_positions[3][0]) * 0.5;
+        assert!(left_top_x < left_base_x);
+    }
+
+    #[test]
+    fn flicker_changes_only_block_light_and_stays_bounded() {
+        for step in 0..1_000 {
+            let intensity = torch_flicker(step as f32 / 60.0);
+            assert!((0.92..=1.08).contains(&intensity));
+        }
+        let midnight_day = crate::domain::DayCycle::from_ticks(18_000);
+        let palette = LightingPalette::from_day(&midnight_day);
+        let low = generate_lightmap(0.0, palette, 0.92);
+        let high = generate_lightmap(0.0, palette, 1.08);
+        assert!(high[lightmap_index(14, 0)].red > low[lightmap_index(14, 0)].red);
+        assert_eq!(high[lightmap_index(0, 15)], low[lightmap_index(0, 15)]);
     }
 
     #[test]
@@ -1288,7 +1646,7 @@ mod tests {
             .unwrap()
             .as_float3()
             .unwrap();
-        assert!(positions.iter().any(|position| position[2] <= -2.5));
+        assert!(positions.iter().any(|position| position[2] <= -4.5));
         assert!(built.cutout.count_vertices() > 0);
         assert!(built.emissive.count_vertices() > 0);
         assert!(build_chunk_collider(&grid.view(), 0).is_some());

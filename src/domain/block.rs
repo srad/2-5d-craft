@@ -7,6 +7,14 @@ pub struct BlockState {
     variant: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
+#[repr(u8)]
+pub enum TorchMount {
+    Floor,
+    WallLeft,
+    WallRight,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BlockDef {
     pub hardness_seconds: f32,
@@ -27,8 +35,7 @@ impl BlockId {
     pub const TORCH: Self = Self(8);
     pub const BEDROCK: Self = Self(9);
 
-    pub const HOTBAR: [Self; 8] = [
-        Self::GRASS,
+    pub const HOTBAR: [Self; 7] = [
         Self::DIRT,
         Self::STONE,
         Self::COAL_ORE,
@@ -64,19 +71,19 @@ impl BlockId {
 
     pub const fn def(self) -> BlockDef {
         match self {
-            Self::GRASS => BlockDef::solid(0.40, 15, Some(1)),
-            Self::DIRT => BlockDef::solid(0.35, 15, Some(2)),
-            Self::STONE => BlockDef::solid(0.80, 15, Some(3)),
-            Self::COAL_ORE => BlockDef::solid(1.20, 15, Some(4)),
-            Self::IRON_ORE => BlockDef::solid(1.50, 15, Some(5)),
-            Self::WOOD => BlockDef::solid(0.80, 15, Some(6)),
-            Self::LEAVES => BlockDef::solid(0.20, 2, Some(7)),
+            Self::GRASS => BlockDef::solid(0.40, 15, None),
+            Self::DIRT => BlockDef::solid(0.35, 15, Some(1)),
+            Self::STONE => BlockDef::solid(0.80, 15, Some(2)),
+            Self::COAL_ORE => BlockDef::solid(1.20, 15, Some(3)),
+            Self::IRON_ORE => BlockDef::solid(1.50, 15, Some(4)),
+            Self::WOOD => BlockDef::solid(0.80, 15, Some(5)),
+            Self::LEAVES => BlockDef::solid(0.20, 2, Some(6)),
             Self::TORCH => BlockDef {
                 hardness_seconds: 0.10,
                 solid: false,
                 light_opacity: 0,
-                emitted_light: 12,
-                hotbar_slot: Some(8),
+                emitted_light: 14,
+                hotbar_slot: Some(7),
             },
             Self::BEDROCK => BlockDef {
                 hardness_seconds: f32::INFINITY,
@@ -126,10 +133,17 @@ impl BlockState {
     pub const WOOD: Self = Self::from_id(BlockId::WOOD);
     pub const LEAVES: Self = Self::from_id(BlockId::LEAVES);
     pub const TORCH: Self = Self::from_id(BlockId::TORCH);
+    pub const WALL_TORCH_LEFT: Self = Self {
+        id: BlockId::TORCH,
+        variant: TorchMount::WallLeft as u8,
+    };
+    pub const WALL_TORCH_RIGHT: Self = Self {
+        id: BlockId::TORCH,
+        variant: TorchMount::WallRight as u8,
+    };
     pub const BEDROCK: Self = Self::from_id(BlockId::BEDROCK);
 
-    pub const HOTBAR: [Self; 8] = [
-        Self::GRASS,
+    pub const HOTBAR: [Self; 7] = [
         Self::DIRT,
         Self::STONE,
         Self::COAL_ORE,
@@ -139,7 +153,7 @@ impl BlockState {
         Self::TORCH,
     ];
 
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 11] = [
         Self::GRASS,
         Self::DIRT,
         Self::STONE,
@@ -149,10 +163,14 @@ impl BlockState {
         Self::LEAVES,
         Self::TORCH,
         Self::BEDROCK,
+        Self::WALL_TORCH_LEFT,
+        Self::WALL_TORCH_RIGHT,
     ];
 
     pub const fn new(id: BlockId, variant: u8) -> Option<Self> {
-        if variant == 0 {
+        if variant == 0
+            || (id.value() == BlockId::TORCH.value() && variant <= TorchMount::WallRight as u8)
+        {
             Some(Self { id, variant })
         } else {
             None
@@ -164,6 +182,12 @@ impl BlockState {
     }
 
     pub const fn from_code(code: u8) -> Option<Self> {
+        if code == 10 {
+            return Some(Self::WALL_TORCH_LEFT);
+        }
+        if code == 11 {
+            return Some(Self::WALL_TORCH_RIGHT);
+        }
         match BlockId::from_code(code) {
             Some(id) => Some(Self::from_id(id)),
             None => None,
@@ -176,6 +200,25 @@ impl BlockState {
 
     pub const fn variant(self) -> u8 {
         self.variant
+    }
+
+    pub const fn torch(mount: TorchMount) -> Self {
+        Self {
+            id: BlockId::TORCH,
+            variant: mount as u8,
+        }
+    }
+
+    pub const fn torch_mount(self) -> Option<TorchMount> {
+        if self.id.value() != BlockId::TORCH.value() {
+            return None;
+        }
+        match self.variant {
+            0 => Some(TorchMount::Floor),
+            1 => Some(TorchMount::WallLeft),
+            2 => Some(TorchMount::WallRight),
+            _ => None,
+        }
     }
 
     pub const fn def(self) -> BlockDef {
@@ -191,7 +234,30 @@ impl BlockState {
     }
 
     pub const fn code(self) -> u8 {
-        self.id.code()
+        match self.torch_mount() {
+            Some(TorchMount::WallLeft) => 10,
+            Some(TorchMount::WallRight) => 11,
+            _ => self.id.code(),
+        }
+    }
+}
+
+impl TorchMount {
+    pub const fn support_offset(self) -> (i32, i32) {
+        match self {
+            Self::Floor => (0, -1),
+            Self::WallLeft => (1, 0),
+            Self::WallRight => (-1, 0),
+        }
+    }
+
+    pub const fn from_placement_offset(x: i32, y: i32) -> Option<Self> {
+        match (x, y) {
+            (0, 1) => Some(Self::Floor),
+            (-1, 0) => Some(Self::WallLeft),
+            (1, 0) => Some(Self::WallRight),
+            _ => None,
+        }
     }
 }
 
@@ -218,9 +284,10 @@ mod tests {
             .iter()
             .map(|state| state.def().hotbar_slot)
             .collect();
-        assert_eq!(slots.len(), 8);
+        assert_eq!(slots.len(), 7);
         assert!(slots.contains(&Some(1)));
-        assert!(slots.contains(&Some(8)));
+        assert!(slots.contains(&Some(7)));
+        assert_eq!(BlockState::GRASS.def().hotbar_slot, None);
     }
 
     #[test]
@@ -236,7 +303,13 @@ mod tests {
         let torch = BlockState::TORCH.def();
         assert!(!torch.solid);
         assert_eq!(torch.light_opacity, 0);
-        assert_eq!(torch.emitted_light, 12);
+        assert_eq!(torch.emitted_light, 14);
+        assert!(
+            BlockState::ALL
+                .into_iter()
+                .filter(|state| state.def().emitted_light > 0)
+                .all(|state| state.torch_mount().is_some())
+        );
     }
 
     #[test]
@@ -247,6 +320,15 @@ mod tests {
         assert_eq!(BlockId::new(10), None);
         assert_eq!(BlockState::new(BlockId::STONE, 0), Some(BlockState::STONE));
         assert_eq!(BlockState::new(BlockId::STONE, 1), None);
+        assert_eq!(
+            BlockState::new(BlockId::TORCH, 1),
+            Some(BlockState::WALL_TORCH_LEFT)
+        );
+        assert_eq!(
+            BlockState::new(BlockId::TORCH, 2),
+            Some(BlockState::WALL_TORCH_RIGHT)
+        );
+        assert_eq!(BlockState::new(BlockId::TORCH, 3), None);
     }
 
     #[test]
@@ -256,5 +338,17 @@ mod tests {
             assert_eq!(BlockState::from_code(state.code()), Some(state));
         }
         assert_eq!(BlockState::from_code(255), None);
+    }
+
+    #[test]
+    fn torch_mounts_define_unambiguous_support_directions() {
+        assert_eq!(TorchMount::Floor.support_offset(), (0, -1));
+        assert_eq!(TorchMount::WallLeft.support_offset(), (1, 0));
+        assert_eq!(TorchMount::WallRight.support_offset(), (-1, 0));
+        assert_eq!(
+            TorchMount::from_placement_offset(-1, 0),
+            Some(TorchMount::WallLeft)
+        );
+        assert_eq!(TorchMount::from_placement_offset(0, -1), None);
     }
 }

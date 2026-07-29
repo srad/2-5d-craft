@@ -11,7 +11,7 @@ use crate::{
         world::WorldMutationMessage,
     },
     application::{break_block, place_block},
-    domain::{BlockTarget, target_from_ray, tile_overlaps_player},
+    domain::{BlockState, BlockTarget, TorchMount, target_from_ray, tile_overlaps_player},
 };
 
 #[derive(Resource, Debug, Default, Deref, DerefMut)]
@@ -155,7 +155,10 @@ fn place_selected(
         return;
     }
     let position = world.local_to_voxel(coordinate);
-    if let Ok(result) = place_block(world, position, player.1.selected_state())
+    let Some(state) = placement_state(player.1.selected_state(), target.0) else {
+        return;
+    };
+    if let Ok(result) = place_block(world, position, state)
         && !result.report.is_empty()
     {
         mutations.write(WorldMutationMessage {
@@ -163,6 +166,17 @@ fn place_selected(
             report: result.report,
         });
     }
+}
+
+fn placement_state(selected: BlockState, target: BlockTarget) -> Option<BlockState> {
+    if selected.torch_mount().is_none() {
+        return Some(selected);
+    }
+    let (Some(support), Some(adjacent)) = (target.block, target.adjacent) else {
+        return None;
+    };
+    let offset = adjacent - support;
+    TorchMount::from_placement_offset(offset.x, offset.y).map(BlockState::torch)
 }
 
 fn update_highlight(
@@ -181,4 +195,38 @@ fn update_highlight(
 fn clear_interaction(mut target: ResMut<BlockTargetResource>, mut mining: ResMut<MiningState>) {
     target.0 = BlockTarget::default();
     *mining = MiningState::default();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn torch_mount_follows_the_targeted_face() {
+        for (adjacent, expected) in [
+            (IVec2::new(4, 5), Some(BlockState::TORCH)),
+            (IVec2::new(3, 4), Some(BlockState::WALL_TORCH_LEFT)),
+            (IVec2::new(5, 4), Some(BlockState::WALL_TORCH_RIGHT)),
+            (IVec2::new(4, 3), None),
+        ] {
+            assert_eq!(
+                placement_state(
+                    BlockState::TORCH,
+                    BlockTarget {
+                        block: Some(IVec2::new(4, 4)),
+                        adjacent: Some(adjacent),
+                    },
+                ),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_blocks_keep_their_selected_state() {
+        assert_eq!(
+            placement_state(BlockState::DIRT, BlockTarget::default()),
+            Some(BlockState::DIRT)
+        );
+    }
 }

@@ -23,8 +23,8 @@ use crate::{
     },
     domain::{
         BlockChunk, BlockState, CHUNK_WIDTH, ChunkChange, ChunkLayer, DEPTH_SLICES, LightVolume,
-        MAX_LIGHT_LEVEL, MutationReport, VoxelLayer, VoxelPos, WORLD_HEIGHT, generate_chunk_at,
-        generated_voxel, world_to_chunk,
+        MAX_LIGHT_LEVEL, MutationReport, TorchMount, VoxelLayer, VoxelPos, WORLD_HEIGHT,
+        generate_chunk_at, generated_voxel, world_to_chunk,
     },
 };
 
@@ -146,10 +146,11 @@ fn spawn_pending_world(
     let fixture_report = (environment_flag("SIDECRAFT_AUTOSTART")
         && environment_flag("SIDECRAFT_TEST_TORCH_FIXTURE"))
     .then(|| {
-        place_test_torch(
+        place_test_torches(
             &mut initialized.state,
             pending.snapshot.player.chunk_x,
             pending.snapshot.player.local_x,
+            pending.snapshot.player.y,
         )
     })
     .flatten();
@@ -182,33 +183,53 @@ fn spawn_pending_world(
     }
 }
 
-fn place_test_torch(
+fn place_test_torches(
     world: &mut WorldState,
     origin_chunk: i64,
     local_player_x: f32,
+    player_y: f32,
 ) -> Option<MutationReport> {
     let player_x = origin_chunk
         .saturating_mul(i64::from(CHUNK_WIDTH))
         .saturating_add(local_player_x.floor() as i64);
+    let base_y = (player_y.ceil() as i32 + 1).clamp(1, WORLD_HEIGHT - 2);
     for offset in [3_i64, 4, 5, -3, -4, -5] {
         let x = player_x.saturating_add(offset);
         if !world
             .view()
             .contains_chunk(ChunkLayer::foreground(world_to_chunk(x)))
+            || !world
+                .view()
+                .contains_chunk(ChunkLayer::foreground(world_to_chunk(x.saturating_add(2))))
         {
             continue;
         }
-        for y in (1..WORLD_HEIGHT).rev() {
-            let position = VoxelPos::foreground(x, y);
-            let supported = world
-                .view()
-                .block(VoxelPos::foreground(x, y - 1))
-                .is_some_and(|state| state.def().solid);
-            if world.view().block(position).is_none() && supported {
-                return place_block(world, position, BlockState::TORCH)
-                    .ok()
-                    .map(|result| result.report);
+        for y in base_y..=(base_y + 3).min(WORLD_HEIGHT - 1) {
+            let floor_support = VoxelPos::foreground(x, y - 1);
+            let floor_torch = VoxelPos::foreground(x, y);
+            let wall_torch = VoxelPos::foreground(x.saturating_add(1), y);
+            let wall_support = VoxelPos::foreground(x.saturating_add(2), y);
+            let placements = [
+                (floor_support, BlockState::DIRT),
+                (wall_support, BlockState::DIRT),
+                (floor_torch, BlockState::TORCH),
+                (wall_torch, BlockState::torch(TorchMount::WallLeft)),
+            ];
+            if placements
+                .iter()
+                .any(|(position, _)| world.view().block(*position).is_some())
+            {
+                continue;
             }
+            let mut report = MutationReport::default();
+            for (position, state) in placements {
+                let placed = place_block(world, position, state)
+                    .expect("validated torch fixture placement must succeed")
+                    .report;
+                report.cell_changes.extend(placed.cell_changes);
+                report.chunk_changes.extend(placed.chunk_changes);
+            }
+            return Some(report);
         }
     }
     None

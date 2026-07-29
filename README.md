@@ -58,7 +58,7 @@ unsupported torches, and blocks overlapping the player.
 
 ## What works
 
-- Deterministic, horizontally unbounded terrain in dense 32 by 80 chunks. Four
+- Deterministic, horizontally unbounded terrain in dense 32 by 80 chunks. Six
   correlated depth slices form a real voxel volume with grass, dirt, stone,
   ores, caves, trees, leaves, and an unbreakable bedrock floor.
 - The player and all interaction remain locked to the front slice while the
@@ -74,19 +74,22 @@ unsupported torches, and blocks overlapping the player.
 - Avian2D kinematic movement, acceleration, jumping, gravity, grounded checks,
   collision sliding, world bounds, and fall recovery.
 - Hardness-based mining and adjacent-face placement.
-- Eight block hotbar, including placeable light-emitting torches.
-- Minecraft-style four-depth lighting with separate 0-15 sky and block
+- Seven block hotbar, including warm, slowly flickering level-14 torches that
+  mount on floors or either side of solid blocks.
+- Minecraft-style six-depth lighting with separate 0-15 sky and block
   channels, six-neighbor propagation, opaque-cell occlusion, neighborhood-
   filtered whole-face shading, subtle quantized ambient occlusion, light-aware
   player colors, and targeted chunk refresh after world changes.
 - Moving clouds, bloom, HDR tonemapping, four-sample MSAA, and an exact
   20-minute, 24,000-tick day/night cycle with a visible pixel-art sun, stars,
-  eight persistent moon phases, stronger cyclic color moods, and animated
-  chunk-batched torch flames.
-- A runtime-built, guttered texture atlas with deterministic material variants,
-  nearest-neighbor block textures, linearly sampled lighting, directional face
-  shading, and four depth-specific exposure and haze levels. Individual block
-  faces remain flat-shaded without within-face gradients.
+  eight persistent moon phases, stronger cyclic color moods, and cap-emissive
+  chunk-batched low-poly floor and wall torches.
+- A runtime-built, guttered 16-by-16-pixel texture atlas with deterministic
+  material variants, closely spaced palettes, connected pixel-art clusters,
+  semantic grass, bark, ring, ore, and leaf motifs, nearest-neighbor block
+  textures, linearly sampled lighting, directional face shading, uniform depth
+  exposure, and bounded depth haze. Individual block faces remain flat-shaded
+  without within-face gradients.
 - Main menu, world selection, HUD, and pause/save controls. Button actions are
   triggered only by Bevy's `Interaction::Pressed` state.
 - Autosave after changed world data, save on pause, and save-aware window
@@ -116,10 +119,10 @@ Clock-only progress autosaves once per real minute of active play (1,200 day
 ticks); pause and exit preserve any whole-tick change. Compression and I/O run
 on Bevy's I/O task pool.
 
-Schema 3 is intentionally a fresh format. Legacy JSON metadata saves are
+Schema 4 is intentionally a fresh format. Legacy JSON metadata saves are
 neither loaded nor migrated. Top-level single-file SCW1 worlds are also
-rejected: schema 3 worlds are package directories only. M2 replaces the
-current save model with exact-schema SCW version 4.
+rejected: schema 4 worlds are package directories only. M2 replaces the
+current save model with exact-schema SCW version 5.
 
 ## Architecture
 
@@ -186,6 +189,7 @@ $env:SIDECRAFT_AUTOCAPTURE = "1"
 $env:SIDECRAFT_TEST_SEED = "9"
 $env:SIDECRAFT_TEST_DAY_TICKS = "18000"
 $env:SIDECRAFT_TEST_TORCH_FIXTURE = "1"
+$env:SIDECRAFT_TEST_TORCH_INTENSITY_PERCENT = "108"
 $env:SIDECRAFT_SCREENSHOT = "sidecraft-e2e.png"
 cargo run
 ```
@@ -198,8 +202,9 @@ captures can target sunrise (`0`), noon (`6000`), sunset (`12000`), midnight
 the normal random seed and advancing clock. Without autostart, startup follows
 the normal main-menu flow. The rendered smoke test still requires a real window
 and graphics adapter. `SIDECRAFT_TEST_TORCH_FIXTURE` is also autostart-only; it
-places one supported surface torch through the normal mutation boundary so the
-block-light and animated torch pipelines are exercised by GPU validation.
+places supported floor and wall torches through the normal mutation boundary.
+`SIDECRAFT_TEST_TORCH_INTENSITY_PERCENT` is autostart-only and accepts `92..=108`
+to freeze the visual flicker at a deterministic intensity for GPU comparison.
 
 ## Current scope
 

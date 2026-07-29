@@ -23,9 +23,10 @@ caves, water, plants, and technology progression of
 - Active item: none
 - Next item: M1.3 — add one local PowerShell quality-gate command
 - Blocker: none
-- Last completed milestone: M6 — refined block lighting and atmospheric effects
+- Last completed work item: M6 presentation slice — established the
+  low-resolution block and scenery aesthetic
 - Verification baseline: confirmed 2026-07-29; formatting, Clippy with warnings
-  denied, 83 automated tests, the release build, and real-GPU day/night captures
+  denied, 92 automated tests, the release build, and real-GPU day/night captures
   passed locally
 
 At the start of a work session, mark exactly one item `[~]`. At the end, change
@@ -37,11 +38,11 @@ from code inspection alone.
 
 - Gameplay is a living-builder loop: systemic terrain, homesteading,
   crafting/technology, exploration, and gentle survival.
-- The world generator is three-dimensional but renders four bounded depth
+- The world generator is three-dimensional but renders six bounded depth
   slices.
 - Depth 0 is the colliding foreground and player plane.
 - Depth 1 is an editable, persistent, non-colliding backwall.
-- Depths 2 and 3 are deterministic render-only scenery.
+- Depths 2 through 5 are deterministic render-only scenery.
 - Simulation follows a Minecraft-like activation model: render distance is
   larger than simulation distance; inactive chunks freeze except for explicit
   bounded ticking areas.
@@ -56,12 +57,12 @@ from code inspection alone.
 
 - `[x]` Main menu, world selection, loading, gameplay HUD, pause, and saving.
 - `[x]` Side-on player movement and interaction locked to the foreground.
-- `[x]` Four correlated voxel depth slices rendered through Bevy's 3D stack.
+- `[x]` Six correlated voxel depth slices rendered through Bevy's 3D stack.
 - `[x]` Deterministic terrain with caves, ores, vegetation, and bedrock.
 - `[x]` Lazy multi-threaded horizontal chunk generation and unloading.
 - `[x]` Floating origin using global `i64` chunk identities.
 - `[x]` Chunk-batched meshes, derived lighting, and merged 2D colliders.
-- `[x]` Mining, block placement, an eight-slot block hotbar, and torches.
+- `[x]` Mining, block placement, a seven-slot block hotbar, and torches.
 - `[x]` Regional Postcard/Zstandard SCW packages and atomic manifest writes.
 - `[x]` Unit, integration, lifecycle, and rendered-smoke test foundations.
 - `[x]` Domain, application, Bevy, UI, and persistence responsibilities were
@@ -71,7 +72,7 @@ from code inspection alone.
 - `[!]` Rear depth slices are generated scenery, not an editable backwall.
 - `[!]` There is no bounded block-simulation engine.
 
-## M1 — Architecture foundation `[~]`
+## M1 — Architecture foundation `[ ]`
 
 ### M1.1 Boundaries and legacy deletion `[x]`
 
@@ -117,9 +118,9 @@ local gates pass.
 
 - `[ ]` Store foreground and backwall as independent dense chunk layers.
 - `[ ]` Initialize both layers from depths 0 and 1 of the 3D generator.
-- `[ ]` Keep depths 2 and 3 generator-derived and render-only.
+- `[ ]` Keep depths 2 through 5 generator-derived and render-only.
 - `[ ]` Make the backwall editable and persistent without creating colliders.
-- `[ ]` Connect authoritative backwall mutations to the existing four-depth
+- `[ ]` Connect authoritative backwall mutations to the existing six-depth
   light volume and depth-aware material presentation.
 - `[ ]` Default interaction to foreground; use `Tab` to select backwall and
   show the active layer in the HUD.
@@ -136,11 +137,11 @@ local gates pass.
   cancelled results before commit.
 - `[ ]` Preserve deterministic generation regardless of task completion order.
 
-### M2.3 SCW schema 4
+### M2.3 SCW schema 5
 
 - `[ ]` Replace current save structs with one current-schema representation;
   do not keep version-suffixed legacy Rust types.
-- `[ ]` Require `SCW1` plus exact `schema_version = 4`.
+- `[ ]` Require `SCW1` plus exact `schema_version = 5`.
 - `[ ]` Encode metadata, palettes, region references, and pending ticks with
   Postcard, then compress SCW payloads with Zstandard.
 - `[ ]` Reserve dense code 0 for air and codes 1–255 for the per-region
@@ -201,6 +202,10 @@ cannot replace the last valid manifest.
   entities authoritative.
 - `[ ]` Plants use random ticks and require valid substrate, free space, and
   sufficient light.
+- `[ ]` Exposed dirt can receive grass from nearby lit grass through
+  deterministic random ticks; covered grass eventually returns to dirt.
+- `[ ]` Remove floor and wall torches whose supports are removed by simulation
+  proposals, using the same mount dependency rule as player-driven breaking.
 - `[ ]` Schedule affected neighbors for no earlier than the next tick to avoid
   unbounded same-tick cascades.
 
@@ -228,7 +233,7 @@ activation, persistence, overload, and physics-clock independence.
   loops.
 - `[ ]` Add workbench and furnace processing using scheduled simulation work.
 - `[ ]` Persist inventory, equipment, stations, and processing state in a new
-  exact save schema; invalidate schema 4 rather than migrating it.
+  exact save schema; invalidate schema 5 rather than migrating it.
 - `[ ]` Test complete gather, craft, place, save, and reload journeys.
 
 M4 is complete when a new player can gather resources, improve tools, build a
@@ -256,16 +261,20 @@ engine form a coherent living-builder loop.
 - `[x]` Establish side-on 2.5D voxel composition with a fixed 10-degree yaw,
   14-degree downward pitch, view-space camera snapping, directional face
   separation, and depth haze.
-- `[x]` Replace smooth PBR world lighting with a four-depth, dual-channel 0-15
+- `[x]` Replace smooth PBR world lighting with a six-depth, dual-channel 0-15
   light volume, six-neighbor sky and block propagation, linearly sampled voxel
   lightmaps with uniform per-face coordinates, targeted invalidation, and
   light-aware player materials.
 - `[x]` Add neighborhood-filtered whole-face lighting, subtle quantized
   ambient occlusion, continuous player tinting, stronger cyclic palettes, and
-  chunk-batched animated torch flames without within-face gradients or
-  real-time PBR world lights.
-- `[ ]` Refine low-poly block materials, face variation, and bevel/highlight
-  cues.
+  chunk-batched torch light without within-face gradients or real-time PBR
+  world lights.
+- `[x]` Establish 16-by-16-pixel block materials with restrained palettes,
+  connected pixel-art clusters, semantic grass, wood, and ore faces, a
+  cap-emissive low-poly torch, uniform depth exposure, and richer six-slice
+  scenery.
+- `[ ]` Add further material-specific face variation and restrained block
+  silhouette cues without smoothing the pixel-art aesthetic.
 - `[ ]` Add fluid surfaces, falling-block interpolation, plant animation,
   particles, weather effects, and responsive interaction feedback.
 - `[ ]` Add music, ambient sound, interaction audio, and volume controls.

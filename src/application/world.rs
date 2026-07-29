@@ -1,8 +1,8 @@
 use crate::application::{ChunkSnapshot, PlayerSnapshot, WorldSession, WorldSnapshot};
 use crate::domain::{
     BlockChunk, BlockGrid, BlockPrecondition, BlockState, BlockWrite, MutationBatchResult,
-    MutationPriority, MutationProposal, MutationReport, VoxelCell, VoxelPos, WORLD_HEIGHT,
-    WorldMutator, WorldView, generate_chunk_at, world_to_chunk,
+    MutationPriority, MutationProposal, MutationReport, TorchMount, VoxelCell, VoxelPos,
+    WORLD_HEIGHT, WorldMutator, WorldView, generate_chunk_at, world_to_chunk,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -176,16 +176,15 @@ pub fn place_block(
             _ => WorldCommandError::Unavailable,
         });
     }
-    if state == BlockState::TORCH
-        && !world
+    if let Some(mount) = state.torch_mount() {
+        let support_position = offset_position(position, mount.support_offset());
+        if !world
             .view()
-            .block(VoxelPos {
-                y: position.y - 1,
-                ..position
-            })
+            .block(support_position)
             .is_some_and(|support| support.def().solid)
-    {
-        return Err(WorldCommandError::Unsupported);
+        {
+            return Err(WorldCommandError::Unsupported);
+        }
     }
     Ok(world.commit_batch(vec![MutationProposal {
         preconditions: vec![BlockPrecondition {
@@ -212,11 +211,6 @@ pub fn break_block(
     if !state.breakable() {
         return Err(WorldCommandError::Unbreakable);
     }
-    let above = VoxelPos {
-        y: position.y + 1,
-        ..position
-    };
-    let unsupported_torch = world.view().block(above) == Some(BlockState::TORCH);
     let mut preconditions = vec![BlockPrecondition {
         position,
         expected: Some(state),
@@ -225,13 +219,22 @@ pub fn break_block(
         position,
         state: None,
     }];
-    if unsupported_torch {
+    for (offset, mount) in [
+        ((0, 1), TorchMount::Floor),
+        ((-1, 0), TorchMount::WallLeft),
+        ((1, 0), TorchMount::WallRight),
+    ] {
+        let torch_position = offset_position(position, offset);
+        let torch = BlockState::torch(mount);
+        if world.view().block(torch_position) != Some(torch) {
+            continue;
+        }
         preconditions.push(BlockPrecondition {
-            position: above,
-            expected: Some(BlockState::TORCH),
+            position: torch_position,
+            expected: Some(torch),
         });
         writes.push(BlockWrite {
-            position: above,
+            position: torch_position,
             state: None,
         });
     }
@@ -242,6 +245,14 @@ pub fn break_block(
         source: position,
         sequence: 0,
     }]))
+}
+
+fn offset_position(position: VoxelPos, offset: (i32, i32)) -> VoxelPos {
+    VoxelPos {
+        global_x: position.global_x.saturating_add(i64::from(offset.0)),
+        y: position.y.saturating_add(offset.1),
+        ..position
+    }
 }
 
 #[cfg(test)]
@@ -300,5 +311,62 @@ mod tests {
             Err(WorldCommandError::Unbreakable)
         );
         assert_eq!(world.revision(), 0);
+    }
+
+    #[test]
+    fn torch_mounts_require_their_designated_support() {
+        let mut world = world();
+        let support = VoxelPos::foreground(5, 70);
+        place_block(&mut world, support, BlockState::DIRT).unwrap();
+
+        for (position, mount) in [
+            (VoxelPos::foreground(5, 71), TorchMount::Floor),
+            (VoxelPos::foreground(4, 70), TorchMount::WallLeft),
+            (VoxelPos::foreground(6, 70), TorchMount::WallRight),
+        ] {
+            place_block(&mut world, position, BlockState::torch(mount)).unwrap();
+            assert_eq!(world.view().block(position), Some(BlockState::torch(mount)));
+        }
+
+        assert_eq!(
+            place_block(
+                &mut world,
+                VoxelPos::foreground(7, 70),
+                BlockState::WALL_TORCH_LEFT,
+            ),
+            Err(WorldCommandError::Unsupported)
+        );
+    }
+
+    #[test]
+    fn breaking_support_atomically_removes_all_attached_torches() {
+        let mut world = world();
+        let support = VoxelPos::foreground(5, 70);
+        place_block(&mut world, support, BlockState::DIRT).unwrap();
+        let torches = [
+            (
+                VoxelPos::foreground(5, 71),
+                BlockState::torch(TorchMount::Floor),
+            ),
+            (
+                VoxelPos::foreground(4, 70),
+                BlockState::torch(TorchMount::WallLeft),
+            ),
+            (
+                VoxelPos::foreground(6, 70),
+                BlockState::torch(TorchMount::WallRight),
+            ),
+        ];
+        for (position, torch) in torches {
+            place_block(&mut world, position, torch).unwrap();
+        }
+
+        let result = break_block(&mut world, support).unwrap();
+
+        assert_eq!(result.report.cell_changes.len(), 4);
+        assert_eq!(world.view().block(support), None);
+        for (position, _) in torches {
+            assert_eq!(world.view().block(position), None);
+        }
     }
 }

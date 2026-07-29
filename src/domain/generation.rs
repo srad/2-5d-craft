@@ -175,15 +175,16 @@ mod tests {
     fn depth_slices_are_correlated_but_not_identical() {
         let samples = (-64..64)
             .map(|x| {
-                [
-                    surface_height_at_depth(71, x, 0),
-                    surface_height_at_depth(71, x, 1),
-                    surface_height_at_depth(71, x, 2),
-                    surface_height_at_depth(71, x, 3),
-                ]
+                (0..DEPTH_SLICES)
+                    .map(|depth| surface_height_at_depth(71, x, depth))
+                    .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        assert!(samples.iter().any(|heights| heights[0] != heights[1]));
+        assert!(samples.iter().any(|heights| {
+            heights
+                .windows(2)
+                .any(|neighbors| neighbors[0] != neighbors[1])
+        }));
     }
 
     #[test]
@@ -191,6 +192,8 @@ mod tests {
         let heights: Vec<_> = (0..DEPTH_SLICES)
             .map(|depth| surface_height_at_depth(9, 0, depth))
             .collect();
-        assert_eq!(heights, [41, 40, 37, 34]);
+        assert_eq!(heights.len(), 6);
+        assert_eq!(&heights[..4], [41, 40, 37, 34]);
+        assert!(heights[4..].iter().all(|height| (20..=58).contains(height)));
     }
 }
