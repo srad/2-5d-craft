@@ -19,7 +19,7 @@ const CHUNK_AREA: usize = (CHUNK_WIDTH * WORLD_HEIGHT) as usize;
 const MAX_SAVED_CHUNKS_PER_FILE: usize = 65_536;
 const REGION_CHUNKS: i64 = 64;
 const MANIFEST_FILE: &str = "manifest.scw";
-const SAVE_SCHEMA_VERSION: u32 = 2;
+const SAVE_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct ScwMetadataV1 {
@@ -30,7 +30,7 @@ struct ScwMetadataV1 {
     seed: u64,
     created_at_unix_s: u64,
     last_played_unix_s: u64,
-    day_phase: f32,
+    day_time_ticks: u64,
     player_chunk_x: i64,
     player_local_x: f32,
     player_y: f32,
@@ -302,7 +302,7 @@ fn save_package(path: &Path, save: &WorldSnapshot) -> Result<(), StoreError> {
         if !region_path.exists() {
             let region_save = WorldSnapshot {
                 last_played_unix_s: 0,
-                day_phase: 0.20,
+                day_time_ticks: 0,
                 player: PlayerSnapshot {
                     chunk_x: 0,
                     local_x: 0.5,
@@ -395,7 +395,15 @@ fn validate_manifest(manifest: &ScwPackageManifestV1) -> Result<(), StoreError> 
 }
 
 fn hash_region(chunks: &[ChunkSnapshot]) -> u64 {
+    hash_region_for_schema(chunks, SAVE_SCHEMA_VERSION)
+}
+
+fn hash_region_for_schema(chunks: &[ChunkSnapshot], schema_version: u32) -> u64 {
     let mut hash = 0xcbf29ce484222325_u64;
+    for byte in schema_version.to_le_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
     for chunk in chunks {
         for byte in chunk
             .x
@@ -691,7 +699,7 @@ fn metadata_from_save(save: &WorldSnapshot) -> ScwMetadataV1 {
         seed: save.seed,
         created_at_unix_s: save.created_at_unix_s,
         last_played_unix_s: save.last_played_unix_s,
-        day_phase: save.day_phase,
+        day_time_ticks: save.day_time_ticks,
         player_chunk_x: save.player.chunk_x,
         player_local_x: save.player.local_x,
         player_y: save.player.y,
@@ -713,7 +721,7 @@ fn save_from_metadata(
         seed: metadata.seed,
         created_at_unix_s: metadata.created_at_unix_s,
         last_played_unix_s: metadata.last_played_unix_s,
-        day_phase: metadata.day_phase,
+        day_time_ticks: metadata.day_time_ticks,
         player: PlayerSnapshot {
             chunk_x: metadata.player_chunk_x,
             local_x: metadata.player_local_x,
@@ -895,6 +903,18 @@ mod tests {
     }
 
     #[test]
+    fn large_absolute_day_time_round_trips_exactly() {
+        let mut save = example_save();
+        save.day_time_ticks = u64::MAX - 17;
+        assert_eq!(
+            decode_scw(&encode_scw(&save).unwrap())
+                .unwrap()
+                .day_time_ticks,
+            u64::MAX - 17
+        );
+    }
+
+    #[test]
     fn invalid_root_produces_an_io_error() {
         let directory = tempdir().unwrap();
         let file_root = directory.path().join("not-a-directory");
@@ -907,24 +927,33 @@ mod tests {
     }
 
     #[test]
-    fn schema_two_is_exact_and_older_metadata_is_rejected() {
+    fn schema_three_is_exact_and_older_metadata_is_rejected() {
         let save = blank_snapshot(1, "World".into(), Vec::new(), spawn_for_seed(1), 1);
         let mut metadata = metadata_from_save(&save);
-        assert_eq!(metadata.schema_version, 2);
-        metadata.schema_version = 1;
+        assert_eq!(metadata.schema_version, 3);
+        metadata.schema_version = 2;
         assert!(matches!(
             save_from_metadata(metadata, Vec::new()),
-            Err(StoreError::UnsupportedSchema(1))
+            Err(StoreError::UnsupportedSchema(2))
         ));
     }
 
     #[test]
-    fn schema_two_palette_discriminants_remain_stable() {
+    fn schema_three_palette_discriminants_remain_stable() {
         assert_eq!(postcard::to_allocvec(&ScwPaletteBlock::Grass).unwrap(), [0]);
         assert_eq!(postcard::to_allocvec(&ScwPaletteBlock::Torch).unwrap(), [7]);
         assert_eq!(
             postcard::to_allocvec(&ScwPaletteBlock::Bedrock).unwrap(),
             [8]
+        );
+    }
+
+    #[test]
+    fn region_hash_is_separated_by_schema() {
+        let chunks = example_save().chunks;
+        assert_ne!(
+            hash_region_for_schema(&chunks, 2),
+            hash_region_for_schema(&chunks, 3)
         );
     }
 }

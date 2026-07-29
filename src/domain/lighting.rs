@@ -15,21 +15,6 @@ pub struct LightGrid {
     cells: Vec<LightCell>,
 }
 
-#[derive(Debug, Clone)]
-pub struct DayCycle {
-    pub phase: f32,
-    pub previous_light_level: u8,
-}
-
-impl Default for DayCycle {
-    fn default() -> Self {
-        Self {
-            phase: 0.20,
-            previous_light_level: 15,
-        }
-    }
-}
-
 impl LightGrid {
     pub fn calculate(view: &WorldView<'_>) -> Self {
         let (min_x, max_x) = view.loaded_x_bounds().unwrap_or((0, 0));
@@ -165,17 +150,6 @@ fn neighbors(position: VoxelPos) -> [VoxelPos; 4] {
     ]
 }
 
-impl DayCycle {
-    pub fn daylight(&self) -> f32 {
-        let angle = self.phase * std::f32::consts::TAU;
-        (0.15 + 0.85 * angle.sin().max(0.0)).clamp(0.15, 1.0)
-    }
-
-    pub fn light_level(&self) -> u8 {
-        (self.daylight() * 15.0).round() as u8
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,17 +185,5 @@ mod tests {
         let light = LightGrid::calculate(&grid.view());
         assert_eq!(light.get(position).torch, 12);
         assert_eq!(light.get(VoxelPos::foreground(5, 4)).torch, 11);
-    }
-
-    #[test]
-    fn day_cycle_has_bounded_light() {
-        for phase in [0.0, 0.25, 0.5, 0.75, 0.999] {
-            let cycle = DayCycle {
-                phase,
-                ..Default::default()
-            };
-            assert!((0.15..=1.0).contains(&cycle.daylight()));
-            assert!(cycle.light_level() <= 15);
-        }
     }
 }

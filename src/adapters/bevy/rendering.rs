@@ -278,14 +278,14 @@ fn face_color(
     face: Face,
     seed: u64,
 ) -> [f32; 4] {
-    let daylight = day.daylight();
+    let daylight = f32::from(day.sky_light_level()) / 15.0;
     let (level, torch) = if depth == 0 {
         let visible = light.visible_at(view, position);
         (
             f32::from(
                 visible
                     .sky
-                    .saturating_mul(day.light_level())
+                    .saturating_mul(day.sky_light_level())
                     .saturating_div(15)
                     .max(visible.torch),
             ) / 15.0,

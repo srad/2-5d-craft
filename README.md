@@ -72,8 +72,9 @@ unsupported torches, and blocks overlapping the player.
   collision sliding, world bounds, and fall recovery.
 - Hardness-based mining and adjacent-face placement.
 - Eight block hotbar, including placeable light-emitting torches.
-- Sky and torch flood lighting, directional sunlight, moving clouds, bloom,
-  HDR tonemapping, four-sample MSAA, and a 180-second day/night cycle.
+- Sky and torch flood lighting, moving clouds, bloom, HDR tonemapping,
+  four-sample MSAA, and an exact 20-minute, 24,000-tick day/night cycle with a
+  visible pixel-art sun, stars, and eight persistent moon phases.
 - A runtime-built, guttered texture atlas with deterministic material variants,
   nearest-neighbor sampling, face shading, and depth shading.
 - Main menu, world selection, HUD, and pause/save controls. Button actions are
@@ -100,13 +101,15 @@ Changed region files are flushed and synced before the manifest is atomically
 replaced; unchanged content-addressed regions are reused. Only chunks changed
 by the player are persisted, while untouched terrain is regenerated exactly
 from the seed. Player position is stored as an `i64` chunk plus local `f32`
-offset, alongside hotbar selection, timestamps, and day phase. Autosave
-compression and I/O run on Bevy's I/O task pool.
+offset, alongside hotbar selection, timestamps, and absolute day ticks.
+Clock-only progress autosaves once per real minute of active play (1,200 day
+ticks); pause and exit preserve any whole-tick change. Compression and I/O run
+on Bevy's I/O task pool.
 
-Schema 2 is intentionally a fresh format. Legacy JSON metadata saves are
+Schema 3 is intentionally a fresh format. Legacy JSON metadata saves are
 neither loaded nor migrated. Top-level single-file SCW1 worlds are also
-rejected: schema 2 worlds are package directories only. M2 replaces the
-current save model with exact-schema SCW version 3.
+rejected: schema 3 worlds are package directories only. M2 replaces the
+current save model with exact-schema SCW version 4.
 
 ## Architecture
 
@@ -115,7 +118,7 @@ and then to a Bevy-free domain:
 
 ```text
 src/
-  domain/          Blocks, dense chunks, generation, targeting, lighting
+  domain/          Blocks, dense chunks, generation, targeting, lighting, time
   application/     World/session state, streaming plans, snapshots, save policy
   adapters/
     bevy/           ECS, Avian, rendering, input, UI, session and save systems
@@ -170,13 +173,16 @@ capture the gameplay frame:
 ```powershell
 $env:SIDECRAFT_AUTOSTART = "1"
 $env:SIDECRAFT_AUTOCAPTURE = "1"
+$env:SIDECRAFT_TEST_DAY_TICKS = "18000"
 $env:SIDECRAFT_SCREENSHOT = "sidecraft-e2e.png"
 cargo run
 ```
 
-Without those environment variables, startup follows the normal main-menu
-flow. The rendered smoke test still requires a real window and graphics
-adapter.
+`SIDECRAFT_TEST_DAY_TICKS` is honored only with autostart and accepts an
+absolute tick count, so captures can target noon (`6000`), sunset (`12900`),
+midnight (`18000`), or a later moon phase. Without these environment
+variables, startup follows the normal main-menu flow. The rendered smoke test
+still requires a real window and graphics adapter.
 
 ## Current scope
 

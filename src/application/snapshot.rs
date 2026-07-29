@@ -12,7 +12,7 @@ pub struct WorldSnapshot {
     pub seed: u64,
     pub created_at_unix_s: u64,
     pub last_played_unix_s: u64,
-    pub day_phase: f32,
+    pub day_time_ticks: u64,
     pub player: PlayerSnapshot,
     pub chunks: Vec<ChunkSnapshot>,
 }
@@ -57,11 +57,6 @@ pub fn validate_snapshot(snapshot: &WorldSnapshot) -> Result<(), SnapshotError> 
     if snapshot.name.trim().is_empty() || snapshot.name.len() > 80 {
         return Err(SnapshotError(
             "world name must contain 1 to 80 characters".into(),
-        ));
-    }
-    if !snapshot.day_phase.is_finite() || !(0.0..1.0).contains(&snapshot.day_phase) {
-        return Err(SnapshotError(
-            "day phase must be finite and in [0, 1)".into(),
         ));
     }
     if !snapshot.player.local_x.is_finite()
@@ -130,7 +125,7 @@ pub fn blank_snapshot(
         seed,
         created_at_unix_s: now_unix_s,
         last_played_unix_s: now_unix_s,
-        day_phase: 0.20,
+        day_time_ticks: crate::domain::SUNRISE_TICKS,
         player: PlayerSnapshot {
             chunk_x: (spawn.x.floor() as i64).div_euclid(i64::from(CHUNK_WIDTH)),
             local_x: spawn.x.rem_euclid(CHUNK_WIDTH as f32),

@@ -1,8 +1,5 @@
 use crate::AppState;
-use crate::{
-    adapters::bevy::{DayCycleResource, player::Player},
-    domain::WORLD_HEIGHT,
-};
+use crate::{adapters::bevy::player::Player, domain::WORLD_HEIGHT};
 use bevy::camera::{ClearColorConfig, Hdr, ScalingMode};
 use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::post_process::bloom::Bloom;
@@ -22,23 +19,8 @@ pub(crate) struct CameraRig {
     logical_position: Vec2,
 }
 
-#[derive(Component)]
-struct SkyBand {
-    index: usize,
-}
-
-#[derive(Component)]
-struct Cloud;
-
-#[derive(Component)]
-struct Sun;
-
 #[derive(Resource)]
 struct AutomaticScreenshot(Timer);
-
-type BackgroundPlayerFilter = (With<Player>, Without<SkyBand>, Without<Cloud>);
-type SkyBandFilter = (With<SkyBand>, Without<Player>, Without<Cloud>);
-type CloudFilter = (With<Cloud>, Without<Player>, Without<SkyBand>);
 
 pub struct CameraPlugin;
 
@@ -50,8 +32,6 @@ impl Plugin for CameraPlugin {
                 Update,
                 (
                     follow_player.run_if(in_state(AppState::Playing)),
-                    animate_environment,
-                    follow_background.run_if(in_state(AppState::Playing)),
                     capture_screenshot,
                     capture_automatic_screenshot,
                     toggle_pause,
@@ -101,11 +81,7 @@ fn capture_automatic_screenshot(
     }
 }
 
-fn setup_scene(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
+fn setup_scene(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
         Camera {
@@ -135,58 +111,6 @@ fn setup_scene(
     commands.insert_resource(CameraRig {
         logical_position: Vec2::new(100.0, 40.0),
     });
-
-    let sky_mesh = meshes.add(Rectangle::new(320.0, 28.0));
-    for index in 0..8 {
-        let fraction = index as f32 / 7.0;
-        let material = materials.add(StandardMaterial {
-            base_color: Color::srgb(
-                0.32 + fraction * 0.25,
-                0.62 + fraction * 0.20,
-                0.88 + fraction * 0.08,
-            ),
-            unlit: true,
-            cull_mode: None,
-            ..default()
-        });
-        commands.spawn((
-            Mesh3d(sky_mesh.clone()),
-            MeshMaterial3d(material),
-            Transform::from_xyz(100.0, index as f32 * 28.0 - 30.0, -24.0),
-            SkyBand { index },
-        ));
-    }
-
-    let cloud_mesh = meshes.add(Rectangle::new(7.0, 2.2));
-    let cloud_material = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.92, 0.96, 1.0, 0.72),
-        alpha_mode: AlphaMode::Blend,
-        unlit: true,
-        cull_mode: None,
-        ..default()
-    });
-    for index in 0..7 {
-        commands.spawn((
-            Mesh3d(cloud_mesh.clone()),
-            MeshMaterial3d(cloud_material.clone()),
-            Transform::from_xyz(
-                index as f32 * 34.0 - 10.0,
-                62.0 + (index % 3) as f32 * 6.0,
-                -12.0 - (index % 2) as f32 * 2.0,
-            ),
-            Cloud,
-        ));
-    }
-
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 8_000.0,
-            shadow_maps_enabled: true,
-            ..default()
-        },
-        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.8, -0.4, 0.0)),
-        Sun,
-    ));
 }
 
 fn follow_player(
@@ -226,47 +150,6 @@ pub(crate) fn center_camera(target: Vec2, camera: &mut Transform, rig: &mut Came
     camera.look_at(target, Vec3::Y);
 }
 
-fn animate_environment(
-    day: Res<DayCycleResource>,
-    mut ambient: Single<&mut AmbientLight, With<GameCamera>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    bands: Query<(&SkyBand, &MeshMaterial3d<StandardMaterial>)>,
-    mut sun: Single<(&mut DirectionalLight, &mut Transform), With<Sun>>,
-) {
-    let (bottom, top) = sky_palette(day.phase);
-    for (band, handle) in &bands {
-        if let Some(mut material) = materials.get_mut(&handle.0) {
-            let fraction = band.index as f32 / 7.0;
-            material.base_color = Color::srgb(
-                lerp(bottom[0], top[0], fraction),
-                lerp(bottom[1], top[1], fraction),
-                lerp(bottom[2], top[2], fraction),
-            );
-        }
-    }
-    let daylight = day.daylight();
-    ambient.brightness = lerp(25.0, 140.0, daylight);
-    sun.0.illuminance = lerp(250.0, 9_000.0, daylight);
-    sun.1.rotation = Quat::from_euler(EulerRot::XYZ, -0.7, day.phase * std::f32::consts::TAU, 0.0);
-}
-
-fn follow_background(
-    time: Res<Time>,
-    player: Single<&Transform, BackgroundPlayerFilter>,
-    mut bands: Query<&mut Transform, SkyBandFilter>,
-    mut clouds: Query<&mut Transform, CloudFilter>,
-) {
-    for mut transform in &mut bands {
-        transform.translation.x = player.translation.x;
-    }
-    for mut transform in &mut clouds {
-        transform.translation.x = wrap_cloud_x(
-            transform.translation.x + time.delta_secs() * 0.7,
-            player.translation.x,
-        );
-    }
-}
-
 fn toggle_pause(
     keyboard: Res<ButtonInput<KeyCode>>,
     state: Res<State<AppState>>,
@@ -300,37 +183,6 @@ pub fn snap(value: f32, pixel_size: f32) -> f32 {
     (value / pixel_size).round() * pixel_size
 }
 
-pub fn wrap_cloud_x(x: f32, center: f32) -> f32 {
-    if x > center + 130.0 {
-        x - 260.0
-    } else if x < center - 130.0 {
-        x + 260.0
-    } else {
-        x
-    }
-}
-
-fn sky_palette(phase: f32) -> ([f32; 3], [f32; 3]) {
-    let daylight = (0.15 + 0.85 * (phase * std::f32::consts::TAU).sin().max(0.0)).clamp(0.15, 1.0);
-    let dusk = (1.0 - ((phase - 0.50).abs() * 8.0).min(1.0)) * (1.0 - daylight);
-    (
-        [
-            lerp(0.035, 0.44, daylight) + dusk * 0.20,
-            lerp(0.025, 0.73, daylight) + dusk * 0.08,
-            lerp(0.090, 0.94, daylight) + dusk * 0.18,
-        ],
-        [
-            lerp(0.015, 0.25, daylight) + dusk * 0.18,
-            lerp(0.020, 0.58, daylight) + dusk * 0.08,
-            lerp(0.060, 0.88, daylight) + dusk * 0.20,
-        ],
-    )
-}
-
-fn lerp(start: f32, end: f32, amount: f32) -> f32 {
-    start + (end - start) * amount
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,13 +213,6 @@ mod tests {
     #[test]
     fn snapping_uses_projection_pixel_size() {
         assert_eq!(snap(1.02, 1.0 / 32.0), 1.03125);
-    }
-
-    #[test]
-    fn cloud_wrap_is_bounded() {
-        assert_eq!(wrap_cloud_x(131.0, 0.0), -129.0);
-        assert_eq!(wrap_cloud_x(-131.0, 0.0), 129.0);
-        assert_eq!(wrap_cloud_x(50.0, 0.0), 50.0);
     }
 
     #[test]

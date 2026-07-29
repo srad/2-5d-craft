@@ -31,6 +31,7 @@ impl Plugin for GamePlugin {
             .configure_sets(
                 Update,
                 (
+                    RuntimeSet::Clock,
                     RuntimeSet::CompletedWork,
                     RuntimeSet::WorldMaintenance,
                     RuntimeSet::Commands,
@@ -49,6 +50,7 @@ impl Plugin for GamePlugin {
                 adapters::bevy::player::PlayerPlugin,
                 adapters::bevy::interaction::InteractionPlugin,
                 adapters::bevy::camera::CameraPlugin,
+                adapters::bevy::environment::EnvironmentPlugin,
                 adapters::bevy::save::SavePlugin,
                 adapters::bevy::session::SessionPlugin,
                 adapters::bevy::ui::GameUiPlugin,

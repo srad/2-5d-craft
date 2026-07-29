@@ -1,4 +1,5 @@
 pub(crate) mod camera;
+pub(crate) mod environment;
 pub(crate) mod interaction;
 pub(crate) mod lighting;
 pub(crate) mod player;
@@ -17,6 +18,7 @@ use std::sync::Arc;
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum RuntimeSet {
+    Clock,
     CompletedWork,
     WorldMaintenance,
     Commands,

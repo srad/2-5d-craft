@@ -42,17 +42,17 @@ The implemented M1.1 layout follows that direction:
 
 ```text
 domain/
-    block, world, generation, targeting, lighting
+    block, world, generation, targeting, lighting, time
 application/
     snapshot, repository port, session, streaming, world state, saving
 adapters/
     bevy/       ECS and presentation integrations
-    storage/    schema-2 SCW package repository
+    storage/    schema-3 SCW package repository
 lib.rs          composition root and schedule ordering
 ```
 
 Domain snapshots are schema-neutral and world IDs are path-free. The storage
-adapter maps those values to the current schema-2 package layout. The Bevy
+adapter maps those values to the current schema-3 package layout. The Bevy
 adapter uses thin resource wrappers because Bevy resources must implement its
 ECS component contract; the wrapped domain and application types remain
 framework-independent.
@@ -74,7 +74,7 @@ Avian, files, compression, or task pools.
 
 The application layer owns use cases and lifecycle:
 
-- the active world session and its revision;
+- the active world session and its composite saved world/day version;
 - chunk requests, activation, loading, generation, and unloading;
 - player/debug commands that request world mutations;
 - simulation orchestration;
@@ -234,11 +234,12 @@ inputs, and performs one deterministic merge before committing.
 - Requested chunks are prioritized nearest-first. Render and unload hysteresis
   prevent task churn.
 - Save workers operate on immutable snapshots captured after a complete
-  mutation commit.
+  mutation commit and a whole presentation-clock tick.
 - One save coordinator serializes publication, coalesces queued requests, and
   prevents an older completion from replacing a newer manifest.
-- A chunk is marked clean only when its current revision still equals the
-  revision captured in the completed snapshot.
+- An escalated pause/exit save completes only when both the block revision and
+  absolute day tick still equal the version captured in the completed
+  snapshot.
 
 ## SCW persistence
 
@@ -246,25 +247,27 @@ Only the current SCW schema is accepted. A structural change bumps
 `schema_version`, deletes the previous reader and tests, and intentionally
 invalidates existing prototype worlds.
 
-The next schema is exactly version 3:
+The current schema is exactly version 3:
 
 - Every file begins with an `SCW1` envelope.
-- Postcard encodes metadata, palettes, region references, and scheduled ticks.
+- Postcard encodes metadata, palettes, and region references.
 - Zstandard compresses each payload.
 - Palette value `0` means air. Values `1..=255` index at most 255 non-air
   `BlockState` entries.
-- Each saved chunk has dense row-major one-byte-per-block foreground and
-  backwall arrays.
+- Each saved chunk has one dense row-major, one-byte-per-block foreground
+  array.
 - Region files are immutable and content-addressed. Unchanged references are
-  reused.
+  reused, and the schema version is a domain separator in every region hash.
 - Region files are flushed and synced before an atomically replaced manifest
   publishes the new snapshot.
 - Obsolete regions are removed only after manifest publication. Failed cleanup
   is harmless and retryable.
 - The manifest stores seed, generator version, world dimensions, player state,
-  day state, `world_tick`, the next tick sequence, and sorted region references.
-- Region content includes pending scheduled ticks from the same world revision
-  as its block arrays.
+  absolute day ticks, and sorted region references.
+
+M2 replaces this prototype layout with exact schema version 4, adding the
+persistent backwall, `world_tick`, the next tick sequence, and region-local
+pending scheduled ticks. Schema 3 will be invalidated rather than migrated.
 
 Magic, schema, framing, decompression, palette, dimensions, ordering, checksum,
 and runtime fields are validated before data enters the domain. Invalid or
@@ -275,13 +278,19 @@ regenerated or passed to an older reader.
 
 The application schedule preserves this order:
 
-1. Accept completed load/generation tasks.
-2. Translate input and UI actions into application commands.
-3. Commit external world commands.
-4. Advance zero or more independent world-simulation ticks.
-5. Dispatch mutation reports into adapter dirty sets.
-6. Rebuild lighting, meshes, and colliders from authoritative data.
-7. Capture or queue save snapshots.
+1. Advance the 20 TPS presentation clock while `Playing`.
+2. Accept completed load/generation tasks.
+3. Translate input and UI actions into application commands.
+4. Commit external world commands.
+5. Advance zero or more independent world-simulation ticks.
+6. Dispatch mutation and daylight changes into adapter dirty sets.
+7. Rebuild lighting, meshes, and colliders from authoritative data.
+8. Capture or queue save snapshots.
+
+The presentation clock stores absolute ticks, wraps its visual phase every
+24,000 ticks, and advances moon phase every day. A discrete skylight-level
+change dirties loaded foreground render meshes only; it does not rebuild the
+light grid, colliders, persistence state, or simulation queues.
 
 Avian continues to use its independently configured fixed physics schedule.
 Changing simulation TPS must not change player movement, collision, or camera

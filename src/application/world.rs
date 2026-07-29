@@ -132,7 +132,7 @@ impl WorldState {
         session: &WorldSession,
         player_position: glam::Vec2,
         selected_slot: u8,
-        day_phase: f32,
+        day_time_ticks: u64,
         last_played_unix_s: u64,
     ) -> WorldSnapshot {
         WorldSnapshot {
@@ -142,7 +142,7 @@ impl WorldState {
             seed: session.seed,
             created_at_unix_s: session.created_at_unix_s,
             last_played_unix_s,
-            day_phase,
+            day_time_ticks,
             player: PlayerSnapshot {
                 chunk_x: self.origin_chunk
                     + (player_position.x.floor() as i64)
@@ -281,13 +281,13 @@ mod tests {
             seed: 11,
             generator_version: crate::domain::GENERATOR_VERSION,
             created_at_unix_s: 1,
-            saved_revision: 0,
+            saved_version: crate::application::SaveVersion::default(),
         };
-        let snapshot = world.snapshot(&session, glam::Vec2::new(1.5, 40.0), 3, 0.75, 9);
+        let snapshot = world.snapshot(&session, glam::Vec2::new(1.5, 40.0), 3, 18_000, 9);
         assert_eq!(snapshot.player.chunk_x, 8);
         assert_eq!(snapshot.player.local_x, 1.5);
         assert_eq!(snapshot.player.selected_slot, 3);
-        assert_eq!(snapshot.day_phase, 0.75);
+        assert_eq!(snapshot.day_time_ticks, 18_000);
         assert_eq!(snapshot.last_played_unix_s, 9);
     }
 

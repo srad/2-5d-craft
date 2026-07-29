@@ -23,9 +23,9 @@ caves, water, plants, and technology progression of
 - Active item: none
 - Next item: M1.3 — add one local PowerShell quality-gate command
 - Blocker: none
-- Last completed milestone: M1.2 — mutation and derived state
+- Last completed milestone: M6 — Minecraft-style day/night presentation
 - Verification baseline: confirmed 2026-07-29; formatting, Clippy with warnings
-  denied, 53 automated tests, the release build, and a real-GPU rendered smoke
+  denied, 66 automated tests, the release build, and real-GPU day/night captures
   passed locally
 
 At the start of a work session, mark exactly one item `[~]`. At the end, change
@@ -135,11 +135,11 @@ local gates pass.
   cancelled results before commit.
 - `[ ]` Preserve deterministic generation regardless of task completion order.
 
-### M2.3 SCW schema 3
+### M2.3 SCW schema 4
 
 - `[ ]` Replace current save structs with one current-schema representation;
   do not keep version-suffixed legacy Rust types.
-- `[ ]` Require `SCW1` plus exact `schema_version = 3`.
+- `[ ]` Require `SCW1` plus exact `schema_version = 4`.
 - `[ ]` Encode metadata, palettes, region references, and pending ticks with
   Postcard, then compress SCW payloads with Zstandard.
 - `[ ]` Reserve dense code 0 for air and codes 1–255 for the per-region
@@ -227,7 +227,7 @@ activation, persistence, overload, and physics-clock independence.
   loops.
 - `[ ]` Add workbench and furnace processing using scheduled simulation work.
 - `[ ]` Persist inventory, equipment, stations, and processing state in a new
-  exact save schema; invalidate schema 3 rather than migrating it.
+  exact save schema; invalidate schema 4 rather than migrating it.
 - `[ ]` Test complete gather, craft, place, save, and reload journeys.
 
 M4 is complete when a new player can gather resources, improve tools, build a
@@ -249,8 +249,11 @@ engine form a coherent living-builder loop.
 
 ## M6 — Presentation, usability, and scale `[ ]`
 
+- `[x]` Add an exact 20-minute, 24,000-tick day/night presentation with a
+  visible pixel-art sun, stars, eight persistent moon phases, celestial
+  lighting, clock-aware saves, and discrete chunk-light refresh.
 - `[ ]` Refine low-poly block materials, face variation, bevel/highlight cues,
-  depth fog, ambient depth, shadows, and day/night presentation.
+  depth fog, ambient depth, and shadows.
 - `[ ]` Add fluid surfaces, falling-block interpolation, plant animation,
   particles, weather effects, and responsive interaction feedback.
 - `[ ]` Add music, ambient sound, interaction audio, and volume controls.

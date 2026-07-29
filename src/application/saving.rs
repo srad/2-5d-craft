@@ -11,8 +11,14 @@ pub enum SaveDestination {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SaveTicket {
     pub id: WorldId,
-    pub revision: u64,
+    pub version: SaveVersion,
     pub destination: SaveDestination,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SaveVersion {
+    pub world_revision: u64,
+    pub day_time_ticks: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,7 +44,7 @@ impl SaveCoordinator {
     pub fn request(
         &mut self,
         id: WorldId,
-        revision: u64,
+        version: SaveVersion,
         destination: SaveDestination,
     ) -> SaveDecision {
         if let Some(ticket) = &mut self.in_flight {
@@ -47,7 +53,7 @@ impl SaveCoordinator {
         }
         let ticket = SaveTicket {
             id,
-            revision,
+            version,
             destination,
         };
         self.in_flight = Some(ticket.clone());
@@ -58,16 +64,19 @@ impl SaveCoordinator {
         self.in_flight.as_ref()
     }
 
-    pub fn complete(&mut self, completion: SaveCompletion, current_revision: u64) -> SaveDecision {
+    pub fn complete(
+        &mut self,
+        completion: SaveCompletion,
+        current_version: SaveVersion,
+    ) -> SaveDecision {
         let Some(ticket) = self.in_flight.take() else {
             return SaveDecision::Idle;
         };
         if completion == SaveCompletion::Failed {
             return SaveDecision::Failed(ticket.destination);
         }
-        if ticket.destination != SaveDestination::Background && current_revision != ticket.revision
-        {
-            return self.request(ticket.id, current_revision, ticket.destination);
+        if ticket.destination != SaveDestination::Background && current_version != ticket.version {
+            return self.request(ticket.id, current_version, ticket.destination);
         }
         SaveDecision::Finish(ticket.destination)
     }
@@ -84,20 +93,61 @@ mod tests {
     #[test]
     fn destinations_escalate_and_latest_revision_is_saved_before_exit() {
         let mut coordinator = SaveCoordinator::default();
+        let first = SaveVersion {
+            world_revision: 2,
+            day_time_ticks: 100,
+        };
         assert!(matches!(
-            coordinator.request(id(), 2, SaveDestination::Background),
+            coordinator.request(id(), first, SaveDestination::Background),
             SaveDecision::Start(_)
         ));
-        coordinator.request(id(), 2, SaveDestination::Exit);
+        coordinator.request(id(), first, SaveDestination::Exit);
         assert_eq!(
             coordinator.ticket().unwrap().destination,
             SaveDestination::Exit
         );
         assert!(matches!(
-            coordinator.complete(SaveCompletion::Succeeded, 3),
+            coordinator.complete(
+                SaveCompletion::Succeeded,
+                SaveVersion {
+                    world_revision: 3,
+                    day_time_ticks: 120,
+                }
+            ),
             SaveDecision::Start(SaveTicket {
-                revision: 3,
+                version: SaveVersion {
+                    world_revision: 3,
+                    day_time_ticks: 120,
+                },
                 destination: SaveDestination::Exit,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn clock_change_alone_restarts_an_escalated_save() {
+        let mut coordinator = SaveCoordinator::default();
+        let captured = SaveVersion {
+            world_revision: 4,
+            day_time_ticks: 1_000,
+        };
+        coordinator.request(id(), captured, SaveDestination::Background);
+        coordinator.request(id(), captured, SaveDestination::MainMenu);
+        assert!(matches!(
+            coordinator.complete(
+                SaveCompletion::Succeeded,
+                SaveVersion {
+                    day_time_ticks: 1_001,
+                    ..captured
+                }
+            ),
+            SaveDecision::Start(SaveTicket {
+                version: SaveVersion {
+                    day_time_ticks: 1_001,
+                    ..
+                },
+                destination: SaveDestination::MainMenu,
                 ..
             })
         ));

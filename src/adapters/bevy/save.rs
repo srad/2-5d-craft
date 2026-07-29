@@ -15,8 +15,12 @@ use crate::{
         player::{Hotbar, Player},
         ui::UiStatus,
     },
-    application::{SaveCompletion, SaveDecision, SaveDestination, SaveTicket, WorldSnapshot},
+    application::{
+        SaveCompletion, SaveDecision, SaveDestination, SaveTicket, SaveVersion, WorldSnapshot,
+    },
 };
+
+const CLOCK_AUTOSAVE_TICKS: u64 = 1_200;
 
 #[derive(Message, Debug, Clone, Copy)]
 pub(crate) struct SaveRequest(pub(crate) SaveDestination);
@@ -24,7 +28,7 @@ pub(crate) struct SaveRequest(pub(crate) SaveDestination);
 #[derive(Resource)]
 struct SaveJob {
     task: Task<Result<(), String>>,
-    revision: u64,
+    version: SaveVersion,
 }
 
 #[derive(Resource)]
@@ -61,10 +65,11 @@ impl Plugin for SavePlugin {
 fn save_when_paused(
     world: Option<Res<WorldStateResource>>,
     session: Option<Res<WorldSessionResource>>,
+    day: Res<DayCycleResource>,
     mut requests: MessageWriter<SaveRequest>,
 ) {
     if let (Some(world), Some(session)) = (world, session)
-        && world.revision() != session.saved_revision
+        && current_version(&world, &day) != session.saved_version
     {
         requests.write(SaveRequest(SaveDestination::Background));
     }
@@ -75,13 +80,14 @@ fn autosave(
     mut timer: ResMut<AutosaveTimer>,
     world: Option<Res<WorldStateResource>>,
     session: Option<Res<WorldSessionResource>>,
+    day: Res<DayCycleResource>,
     mut requests: MessageWriter<SaveRequest>,
 ) {
     if !timer.0.tick(time.delta()).just_finished() {
         return;
     }
     if let (Some(world), Some(session)) = (world, session)
-        && world.revision() != session.saved_revision
+        && needs_autosave(current_version(&world, &day), session.saved_version)
     {
         requests.write(SaveRequest(SaveDestination::Background));
     }
@@ -91,6 +97,7 @@ fn handle_close_request(
     mut close_requests: MessageReader<WindowCloseRequested>,
     world: Option<Res<WorldStateResource>>,
     session: Option<Res<WorldSessionResource>>,
+    day: Res<DayCycleResource>,
     mut save_requests: MessageWriter<SaveRequest>,
     mut next_state: ResMut<NextState<AppState>>,
     mut exits: MessageWriter<AppExit>,
@@ -99,7 +106,7 @@ fn handle_close_request(
         return;
     }
     if let (Some(world), Some(session)) = (world, session)
-        && world.revision() != session.saved_revision
+        && current_version(&world, &day) != session.saved_version
     {
         save_requests.write(SaveRequest(SaveDestination::Exit));
         next_state.set(AppState::Saving);
@@ -129,14 +136,15 @@ fn handle_save_requests(
         finish_destination(destination, &mut next_state, &mut exits);
         return;
     };
+    let version = current_version(&world, &day);
     if destination == SaveDestination::Background
-        && world.revision() == session.saved_revision
+        && version == session.saved_version
         && coordinator.ticket().is_none()
     {
         finish_destination(destination, &mut next_state, &mut exits);
         return;
     }
-    let decision = coordinator.request(session.id.clone(), world.revision(), destination);
+    let decision = coordinator.request(session.id.clone(), version, destination);
     if let SaveDecision::Start(ticket) = decision
         && let Err(error) = start_save(
             &mut commands,
@@ -148,7 +156,7 @@ fn handle_save_requests(
             &ticket,
         )
     {
-        coordinator.complete(SaveCompletion::Failed, world.revision());
+        coordinator.complete(SaveCompletion::Failed, version);
         status.0 = format!("Save failed: {error}");
         if destination != SaveDestination::Background {
             next_state.set(AppState::Paused);
@@ -176,18 +184,20 @@ fn poll_save_job(
     let Some(result) = check_ready(&mut job.task) else {
         return;
     };
-    let revision = job.revision;
+    let version = job.version;
     commands.remove_resource::<SaveJob>();
-    let current_revision = world.as_ref().map_or(revision, |world| world.revision());
+    let current_version = world
+        .as_ref()
+        .map_or(version, |world| current_version(world, &day));
     let completion = if result.is_ok() {
         if let Some(session) = session.as_mut() {
-            session.saved_revision = session.saved_revision.max(revision);
+            session.saved_version = version;
         }
         SaveCompletion::Succeeded
     } else {
         SaveCompletion::Failed
     };
-    match coordinator.complete(completion, current_revision) {
+    match coordinator.complete(completion, current_version) {
         SaveDecision::Start(ticket) => {
             let (Some(world), Some(session)) = (world, session.as_deref()) else {
                 return;
@@ -201,7 +211,7 @@ fn poll_save_job(
                 &day,
                 &ticket,
             ) {
-                coordinator.complete(SaveCompletion::Failed, current_revision);
+                coordinator.complete(SaveCompletion::Failed, current_version);
                 status.0 = format!("Save failed: {error}");
                 next_state.set(AppState::Paused);
             } else {
@@ -249,7 +259,7 @@ fn start_save(
     });
     commands.insert_resource(SaveJob {
         task,
-        revision: ticket.revision,
+        version: ticket.version,
     });
     Ok(())
 }
@@ -265,9 +275,21 @@ fn snapshot_world(
         session,
         player.translation.truncate(),
         hotbar.selected_slot,
-        day.phase,
+        day.day_time_ticks(),
         now_unix_s(),
     )
+}
+
+fn current_version(world: &WorldStateResource, day: &DayCycleResource) -> SaveVersion {
+    SaveVersion {
+        world_revision: world.revision(),
+        day_time_ticks: day.day_time_ticks(),
+    }
+}
+
+fn needs_autosave(current: SaveVersion, saved: SaveVersion) -> bool {
+    current.world_revision != saved.world_revision
+        || current.day_time_ticks.saturating_sub(saved.day_time_ticks) >= CLOCK_AUTOSAVE_TICKS
 }
 
 fn finish_destination(
@@ -289,4 +311,45 @@ fn now_unix_s() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clock_only_autosave_waits_one_minute() {
+        let saved = SaveVersion {
+            world_revision: 8,
+            day_time_ticks: 50,
+        };
+        assert!(!needs_autosave(
+            SaveVersion {
+                day_time_ticks: 1_249,
+                ..saved
+            },
+            saved
+        ));
+        assert!(needs_autosave(
+            SaveVersion {
+                day_time_ticks: 1_250,
+                ..saved
+            },
+            saved
+        ));
+    }
+
+    #[test]
+    fn block_change_requests_autosave_immediately() {
+        assert!(needs_autosave(
+            SaveVersion {
+                world_revision: 2,
+                day_time_ticks: 100,
+            },
+            SaveVersion {
+                world_revision: 1,
+                day_time_ticks: 100,
+            }
+        ));
+    }
 }

@@ -12,12 +12,13 @@ use crate::{
         DayCycleResource, LightGridResource, PendingWorldResource, RuntimeSet,
         WorldSessionResource, WorldStateResource,
         camera::{CameraRig, GameCamera, center_camera},
+        lighting::{SkyLightLevelChanged, configured_start_time},
         player::{Player, RespawnPoint},
         rendering::{RenderCatalog, build_chunk_collider, build_chunk_meshes},
     },
     application::{
-        StreamConfig, WorldId, WorldSession, WorldState, plan_generation_requests, plan_unloads,
-        result_is_still_requested,
+        SaveVersion, StreamConfig, WorldId, WorldSession, WorldState, plan_generation_requests,
+        plan_unloads, result_is_still_requested,
     },
     domain::{
         BlockChunk, CHUNK_WIDTH, ChunkChange, ChunkLayer, LightGrid, MutationReport, VoxelLayer,
@@ -116,7 +117,8 @@ impl Plugin for WorldPlugin {
             )
             .add_systems(
                 Update,
-                refresh_lighting
+                (invalidate_daylight_meshes, refresh_lighting)
+                    .chain()
                     .in_set(RuntimeSet::Derived)
                     .run_if(in_state(AppState::Playing)),
             )
@@ -138,8 +140,7 @@ fn spawn_pending_world(
     let Some(pending) = pending else {
         return;
     };
-    day.phase = pending.snapshot.day_phase;
-    day.previous_light_level = day.light_level();
+    day.0 = configured_start_time(pending.snapshot.day_time_ticks);
     let initialized = WorldState::from_snapshot(&pending.snapshot);
     commands.insert_resource(LightGridResource(LightGrid::calculate(
         &initialized.state.view(),
@@ -151,7 +152,10 @@ fn spawn_pending_world(
         seed: pending.snapshot.seed,
         generator_version: pending.snapshot.generator_version,
         created_at_unix_s: pending.snapshot.created_at_unix_s,
-        saved_revision: 0,
+        saved_version: SaveVersion {
+            world_revision: 0,
+            day_time_ticks: pending.snapshot.day_time_ticks,
+        },
     }));
     commands.insert_resource(WorldPresentation::default());
     commands.insert_resource(WorldDirtySets::default());
@@ -410,6 +414,26 @@ fn refresh_lighting(
         light.0 = LightGrid::calculate(&world.view());
         dirty.lighting.clear();
     }
+}
+
+fn invalidate_daylight_meshes(
+    mut changes: MessageReader<SkyLightLevelChanged>,
+    world: Option<Res<WorldStateResource>>,
+    mut dirty: Option<ResMut<WorldDirtySets>>,
+) {
+    if changes.read().next().is_none() {
+        return;
+    }
+    let (Some(world), Some(dirty)) = (world, dirty.as_mut()) else {
+        return;
+    };
+    mark_daylight_dirty(world.view().loaded_chunks(), dirty);
+}
+
+fn mark_daylight_dirty(loaded_chunks: impl Iterator<Item = i64>, dirty: &mut WorldDirtySets) {
+    dirty
+        .render
+        .extend(loaded_chunks.map(ChunkLayer::foreground));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -707,6 +731,25 @@ mod tests {
         );
         assert_eq!(dirty.lighting, BTreeSet::from([ChunkLayer::foreground(4)]));
         assert_eq!(dirty.collision, BTreeSet::from([ChunkLayer::foreground(4)]));
+        assert!(dirty.simulation.is_empty());
+    }
+
+    #[test]
+    fn daylight_changes_only_dirty_loaded_render_meshes() {
+        let mut dirty = WorldDirtySets::default();
+
+        mark_daylight_dirty([-2, 0, 3].into_iter(), &mut dirty);
+
+        assert_eq!(
+            dirty.render,
+            BTreeSet::from([
+                ChunkLayer::foreground(-2),
+                ChunkLayer::foreground(0),
+                ChunkLayer::foreground(3),
+            ])
+        );
+        assert!(dirty.lighting.is_empty());
+        assert!(dirty.collision.is_empty());
         assert!(dirty.simulation.is_empty());
     }
 }

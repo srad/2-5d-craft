@@ -8,7 +8,9 @@ mod world;
 pub use repository::{
     InvalidWorldEntry, RepositoryError, WorldCatalog, WorldId, WorldRepository, WorldSummary,
 };
-pub use saving::{SaveCompletion, SaveCoordinator, SaveDecision, SaveDestination, SaveTicket};
+pub use saving::{
+    SaveCompletion, SaveCoordinator, SaveDecision, SaveDestination, SaveTicket, SaveVersion,
+};
 pub use session::{PendingWorld, WorldSession};
 pub use snapshot::{
     ChunkSnapshot, PlayerSnapshot, SnapshotError, WorldSnapshot, blank_snapshot, validate_snapshot,

@@ -35,7 +35,7 @@ fn new_world_edit_save_and_reload_lifecycle() {
     );
 
     let mut updated = loaded;
-    updated.day_phase = 0.82;
+    updated.day_time_ticks = 123_456_789;
     updated.player.local_x = spawn.x + 2.0;
     updated.player.y = spawn.y + 1.0;
     updated.player.selected_slot = 6;
@@ -52,7 +52,7 @@ fn new_world_edit_save_and_reload_lifecycle() {
         Vec2::new(reloaded.player.local_x, reloaded.player.y),
         spawn + Vec2::new(2.0, 1.0)
     );
-    assert_eq!(reloaded.day_phase, 0.82);
+    assert_eq!(reloaded.day_time_ticks, 123_456_789);
     assert!(
         LightGrid::calculate(&reconstructed.view())
             .visible_at(&reconstructed.view(), placed)
@@ -65,10 +65,7 @@ fn new_world_edit_save_and_reload_lifecycle() {
     assert!(listed.invalid.is_empty());
     assert_eq!(listed.valid[0].name, "End-to-end world");
 
-    let cycle = DayCycle {
-        phase: reloaded.day_phase,
-        ..Default::default()
-    };
-    assert!(cycle.daylight() >= 0.15);
-    assert!(cycle.light_level() <= 15);
+    let cycle = DayCycle::from_ticks(reloaded.day_time_ticks);
+    assert!((0.0..=1.0).contains(&cycle.daylight()));
+    assert!((4..=15).contains(&cycle.sky_light_level()));
 }
