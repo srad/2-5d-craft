@@ -23,9 +23,9 @@ caves, water, plants, and technology progression of
 - Active item: none
 - Next item: M1.3 — add one local PowerShell quality-gate command
 - Blocker: none
-- Last completed milestone: M6 — block lighting and side-on 2.5D presentation
+- Last completed milestone: M6 — refined block lighting and atmospheric effects
 - Verification baseline: confirmed 2026-07-29; formatting, Clippy with warnings
-  denied, 76 automated tests, the release build, and real-GPU day/night captures
+  denied, 83 automated tests, the release build, and real-GPU day/night captures
   passed locally
 
 At the start of a work session, mark exactly one item `[~]`. At the end, change
@@ -257,10 +257,13 @@ engine form a coherent living-builder loop.
   14-degree downward pitch, view-space camera snapping, directional face
   separation, and depth haze.
 - `[x]` Replace smooth PBR world lighting with a four-depth, dual-channel 0-15
-  light volume, six-neighbor sky and block propagation, nearest-neighbor voxel
-  lightmap sampling, targeted invalidation, and light-aware player materials.
-- `[ ]` Add Minecraft-style corner ambient occlusion and smooth per-vertex
-  light interpolation without reintroducing real-time PBR world lights.
+  light volume, six-neighbor sky and block propagation, linearly sampled voxel
+  lightmaps with uniform per-face coordinates, targeted invalidation, and
+  light-aware player materials.
+- `[x]` Add neighborhood-filtered whole-face lighting, subtle quantized
+  ambient occlusion, continuous player tinting, stronger cyclic palettes, and
+  chunk-batched animated torch flames without within-face gradients or
+  real-time PBR world lights.
 - `[ ]` Refine low-poly block materials, face variation, and bevel/highlight
   cues.
 - `[ ]` Add fluid surfaces, falling-block interpolation, plant animation,

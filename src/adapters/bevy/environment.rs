@@ -7,7 +7,9 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 
-use crate::adapters::bevy::{DayCycleResource, RuntimeSet, camera::GameCamera};
+use crate::adapters::bevy::{
+    DayCycleResource, RuntimeSet, camera::GameCamera, lighting::LightingPalette,
+};
 
 const SKY_BANDS: usize = 8;
 const SKY_DEPTH: f32 = -80.0;
@@ -176,7 +178,8 @@ fn animate_environment(
     };
     let half_view = projection.area.half_size();
     let (sun_position, moon_position) = celestial_positions(day.phase(), half_view);
-    let (bottom, top) = sky_palette(day.daylight(), day.twilight());
+    let palette = LightingPalette::from_day(&day);
+    let (bottom, top) = (palette.sky_bottom, palette.sky_top);
     let night = day.night();
 
     for (mut transform, mut handle, band, stars, body, cloud) in &mut visuals {
@@ -249,21 +252,6 @@ fn wrap_cloud_x(x: f32, radius: f32) -> f32 {
     } else {
         x
     }
-}
-
-fn sky_palette(daylight: f32, twilight: f32) -> ([f32; 3], [f32; 3]) {
-    (
-        [
-            lerp(0.035, 0.44, daylight) + twilight * 0.28,
-            lerp(0.025, 0.73, daylight) + twilight * 0.08,
-            lerp(0.090, 0.94, daylight) + twilight * 0.12,
-        ],
-        [
-            lerp(0.015, 0.25, daylight) + twilight * 0.20,
-            lerp(0.020, 0.58, daylight) + twilight * 0.06,
-            lerp(0.060, 0.88, daylight) + twilight * 0.16,
-        ],
-    )
 }
 
 fn unlit_material(texture: Option<Handle<Image>>, base_color: Color) -> StandardMaterial {

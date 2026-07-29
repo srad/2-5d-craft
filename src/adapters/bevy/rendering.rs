@@ -1,21 +1,32 @@
-use crate::adapters::bevy::{DayCycleResource, RuntimeSet, world::WorldEntity};
-use crate::domain::{
-    BlockState, CHUNK_WIDTH, ChunkLayer, DEPTH_SLICES, LightCell, LightVolume, VoxelPos,
-    WORLD_HEIGHT, WorldView, generated_voxel, stable_hash, world_to_chunk,
+use crate::{
+    AppState,
+    adapters::bevy::{DayCycleResource, RuntimeSet, lighting::LightingPalette, world::WorldEntity},
+    domain::{
+        BlockState, CHUNK_WIDTH, ChunkLayer, DEPTH_SLICES, LightCell, LightVolume, MAX_LIGHT_LEVEL,
+        VoxelPos, WORLD_HEIGHT, WorldView, generated_voxel, stable_hash, world_to_chunk,
+    },
 };
 use avian2d::prelude::*;
 use bevy::asset::RenderAssetUsages;
 use bevy::image::ImageSampler;
-use bevy::mesh::{Indices, PrimitiveTopology};
+use bevy::mesh::{Indices, MeshVertexAttribute, MeshVertexBufferLayoutRef, PrimitiveTopology};
+use bevy::pbr::{MaterialPipeline, MaterialPipelineKey};
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
-use bevy::render::render_resource::{AsBindGroup, Extent3d, TextureDimension, TextureFormat};
+use bevy::render::render_resource::{
+    AsBindGroup, Extent3d, RenderPipelineDescriptor, SpecializedMeshPipelineError,
+    TextureDimension, TextureFormat, VertexFormat,
+};
 use bevy::shader::{Shader, ShaderRef};
 
 const TEXTURE_SIZE: u32 = 32;
 const LIGHTMAP_SIZE: u32 = 16;
 const VOXEL_SHADER_HANDLE: Handle<Shader> =
     bevy::asset::uuid_handle!("a42fc7d0-7442-45b1-a797-bbefec330f96");
+const TORCH_SHADER_HANDLE: Handle<Shader> =
+    bevy::asset::uuid_handle!("dedfb6b1-5089-40e9-a4aa-f37684b33ad3");
+const ATTRIBUTE_TORCH_EFFECT: MeshVertexAttribute =
+    MeshVertexAttribute::new("TorchEffect", 2_134_867_501, VertexFormat::Float32x4);
 const ATLAS_VARIANTS: u32 = 3;
 const FACE_VARIANTS: u32 = 3;
 const GUTTER: u32 = 2;
@@ -26,7 +37,7 @@ const ATLAS_TILES: u32 = BlockState::ALL.len() as u32 * ATLAS_VARIANTS * FACE_VA
 pub struct RenderCatalog {
     pub opaque_material: Handle<VoxelMaterial>,
     pub cutout_material: Handle<VoxelMaterial>,
-    pub emissive_material: Handle<StandardMaterial>,
+    pub emissive_material: Handle<TorchMaterial>,
     selection_mesh: Handle<Mesh>,
     selection_material: Handle<StandardMaterial>,
     pub player_cube: Handle<Mesh>,
@@ -57,6 +68,45 @@ impl Material for VoxelMaterial {
     }
 }
 
+#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+pub struct TorchMaterial {
+    #[texture(0)]
+    #[sampler(1)]
+    atlas: Handle<Image>,
+    #[uniform(2)]
+    effects: Vec4,
+}
+
+impl Material for TorchMaterial {
+    fn vertex_shader() -> ShaderRef {
+        TORCH_SHADER_HANDLE.clone().into()
+    }
+
+    fn fragment_shader() -> ShaderRef {
+        TORCH_SHADER_HANDLE.clone().into()
+    }
+
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Mask(0.18)
+    }
+
+    fn specialize(
+        _pipeline: &MaterialPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        let vertex_layout = layout.0.get_layout(&[
+            Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
+            Mesh::ATTRIBUTE_UV_0.at_shader_location(1),
+            ATTRIBUTE_TORCH_EFFECT.at_shader_location(2),
+        ])?;
+        descriptor.vertex.buffers = vec![vertex_layout];
+        descriptor.primitive.cull_mode = None;
+        Ok(())
+    }
+}
+
 #[derive(Resource)]
 pub(crate) struct VoxelLightmap {
     colors: [LinearRgba; (LIGHTMAP_SIZE * LIGHTMAP_SIZE) as usize],
@@ -65,10 +115,13 @@ pub(crate) struct VoxelLightmap {
 }
 
 impl VoxelLightmap {
-    pub(crate) fn sample(&self, light: LightCell) -> LinearRgba {
-        self.colors[lightmap_index(light.block, light.sky)]
+    pub(crate) fn sample_levels(&self, block: f32, sky: f32) -> LinearRgba {
+        sample_lightmap(&self.colors, block, sky)
     }
 }
+
+#[derive(Resource, Default)]
+struct TorchEffectClock(f32);
 
 #[derive(Component)]
 pub struct SelectionOutline;
@@ -83,9 +136,24 @@ impl Plugin for RenderingPlugin {
             "../../../assets/shaders/voxel_material.wgsl",
             Shader::from_wgsl
         );
-        app.add_plugins(MaterialPlugin::<VoxelMaterial>::default())
-            .add_systems(Startup, build_catalog)
-            .add_systems(Update, update_voxel_lightmap.in_set(RuntimeSet::Derived));
+        bevy::asset::load_internal_asset!(
+            app,
+            TORCH_SHADER_HANDLE,
+            "../../../assets/shaders/torch_material.wgsl",
+            Shader::from_wgsl
+        );
+        app.add_plugins((
+            MaterialPlugin::<VoxelMaterial>::default(),
+            MaterialPlugin::<TorchMaterial>::default(),
+        ))
+        .init_resource::<TorchEffectClock>()
+        .add_systems(Startup, build_catalog)
+        .add_systems(
+            Update,
+            (update_voxel_lightmap, animate_torch_material)
+                .in_set(RuntimeSet::Derived)
+                .run_if(in_state(AppState::Playing)),
+        );
     }
 }
 
@@ -95,15 +163,17 @@ fn build_catalog(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut voxel_materials: ResMut<Assets<VoxelMaterial>>,
+    mut torch_materials: ResMut<Assets<TorchMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
     let mut atlas_image = atlas_image();
     atlas_image.sampler = ImageSampler::nearest();
     let atlas = images.add(atlas_image);
-    let lightmap_colors = generate_lightmap(day.daylight());
+    let palette = LightingPalette::from_day(&day);
+    let lightmap_colors = generate_lightmap(day.daylight(), palette);
     let lightmap_bytes = encode_lightmap(&lightmap_colors);
     let lightmap_image = images.add(lightmap_image(lightmap_bytes.clone()));
-    let haze_color = haze_color(day.daylight());
+    let haze_color = LinearRgba::rgb(palette.haze[0], palette.haze[1], palette.haze[2]);
     let opaque_material = voxel_materials.add(VoxelMaterial {
         atlas: atlas.clone(),
         lightmap: lightmap_image.clone(),
@@ -116,13 +186,9 @@ fn build_catalog(
         haze_color,
         alpha_mode: AlphaMode::Mask(0.38),
     });
-    let emissive_material = materials.add(StandardMaterial {
-        base_color_texture: Some(atlas),
-        alpha_mode: AlphaMode::Mask(0.18),
-        emissive: LinearRgba::rgb(4.5, 2.0, 0.35),
-        unlit: true,
-        cull_mode: None,
-        ..default()
+    let emissive_material = torch_materials.add(TorchMaterial {
+        atlas,
+        effects: Vec4::ZERO,
     });
     let player_cube = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
     let player_colors = [
@@ -180,22 +246,37 @@ pub(crate) fn update_voxel_lightmap(
     let (Some(catalog), Some(lightmap)) = (catalog, lightmap.as_mut()) else {
         return;
     };
-    let colors = generate_lightmap(day.daylight());
+    let palette = LightingPalette::from_day(&day);
+    let colors = generate_lightmap(day.daylight(), palette);
     let bytes = encode_lightmap(&colors);
-    if bytes == lightmap.bytes {
-        return;
+    if bytes != lightmap.bytes {
+        if let Some(mut image) = images.get_mut(&lightmap.image) {
+            *image = lightmap_image(bytes.clone());
+        }
+        lightmap.bytes = bytes;
     }
-    if let Some(mut image) = images.get_mut(&lightmap.image) {
-        *image = lightmap_image(bytes.clone());
-    }
-    let haze_color = haze_color(day.daylight());
+    let haze_color = LinearRgba::rgb(palette.haze[0], palette.haze[1], palette.haze[2]);
     for handle in [&catalog.opaque_material, &catalog.cutout_material] {
         if let Some(mut material) = materials.get_mut(handle) {
             material.haze_color = haze_color;
         }
     }
     lightmap.colors = colors;
-    lightmap.bytes = bytes;
+}
+
+fn animate_torch_material(
+    time: Res<Time>,
+    mut clock: ResMut<TorchEffectClock>,
+    catalog: Option<Res<RenderCatalog>>,
+    mut materials: ResMut<Assets<TorchMaterial>>,
+) {
+    clock.0 = (clock.0 + time.delta_secs()) % 1_024.0;
+    let Some(catalog) = catalog else {
+        return;
+    };
+    if let Some(mut material) = materials.get_mut(&catalog.emissive_material) {
+        material.effects.x = clock.0;
+    }
 }
 
 pub fn spawn_selection_outline(commands: &mut Commands, catalog: &RenderCatalog) {
@@ -267,10 +348,61 @@ impl Face {
             Self::Right | Self::Left => 0.6,
         }
     }
+
+    const fn corner_tangents(self) -> [(VoxelOffset, VoxelOffset); 4] {
+        const LEFT: VoxelOffset = VoxelOffset::new(-1, 0, 0);
+        const RIGHT: VoxelOffset = VoxelOffset::new(1, 0, 0);
+        const DOWN: VoxelOffset = VoxelOffset::new(0, -1, 0);
+        const UP: VoxelOffset = VoxelOffset::new(0, 1, 0);
+        const FRONT: VoxelOffset = VoxelOffset::new(0, 0, -1);
+        const BACK: VoxelOffset = VoxelOffset::new(0, 0, 1);
+        match self {
+            Self::Front => [(LEFT, DOWN), (RIGHT, DOWN), (RIGHT, UP), (LEFT, UP)],
+            Self::Back => [(RIGHT, DOWN), (LEFT, DOWN), (LEFT, UP), (RIGHT, UP)],
+            Self::Right => [(FRONT, DOWN), (BACK, DOWN), (BACK, UP), (FRONT, UP)],
+            Self::Left => [(BACK, DOWN), (FRONT, DOWN), (FRONT, UP), (BACK, UP)],
+            Self::Top => [(LEFT, FRONT), (RIGHT, FRONT), (RIGHT, BACK), (LEFT, BACK)],
+            Self::Bottom => [(LEFT, BACK), (RIGHT, BACK), (RIGHT, FRONT), (LEFT, FRONT)],
+        }
+    }
 }
 
-const NIGHT_HAZE: [f32; 3] = [0.08, 0.11, 0.20];
-const DAY_HAZE: [f32; 3] = [0.34, 0.46, 0.60];
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VoxelOffset {
+    x: i32,
+    y: i32,
+    depth: i32,
+}
+
+impl VoxelOffset {
+    const fn new(x: i32, y: i32, depth: i32) -> Self {
+        Self { x, y, depth }
+    }
+
+    const fn add(self, other: Self) -> Self {
+        Self::new(self.x + other.x, self.y + other.y, self.depth + other.depth)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FaceVertexLight {
+    sky: f32,
+    block: f32,
+    shade: f32,
+}
+
+impl FaceVertexLight {
+    fn encoded(self, depth: u8) -> [f32; 4] {
+        [
+            self.sky / f32::from(MAX_LIGHT_LEVEL),
+            self.block / f32::from(MAX_LIGHT_LEVEL),
+            self.shade,
+            f32::from(depth) / f32::from(DEPTH_SLICES - 1),
+        ]
+    }
+}
+
+const AO_SHADE: [f32; 4] = [0.82, 0.88, 0.94, 1.0];
 
 pub struct ChunkMeshes {
     pub opaque: Mesh,
@@ -286,7 +418,7 @@ pub fn build_chunk_meshes(
 ) -> ChunkMeshes {
     let mut opaque = VoxelMeshBuilder::default();
     let mut cutout = VoxelMeshBuilder::default();
-    let mut emissive = VoxelMeshBuilder::default();
+    let mut emissive = TorchMeshBuilder::default();
     let voxel_at = |global_x: i64, y: i32, depth: i32| -> Option<BlockState> {
         if !(0..WORLD_HEIGHT).contains(&y) || !(0..i32::from(DEPTH_SLICES)).contains(&depth) {
             return None;
@@ -313,7 +445,8 @@ pub fn build_chunk_meshes(
                 ) % 3) as u32;
                 if state == BlockState::TORCH {
                     if depth == 0 {
-                        emissive.push_torch(local_x as f32, y as f32, variant);
+                        let effect_seed = stable_hash(seed, global_x, y, 0x54_4f_52_43_48);
+                        emissive.push_torch(local_x as f32, y as f32, variant, effect_seed);
                     }
                     continue;
                 }
@@ -329,13 +462,7 @@ pub fn build_chunk_meshes(
                     {
                         continue;
                     }
-                    let sampled = face_light(light, global_x, y, depth, face, &voxel_at);
-                    let color = [
-                        f32::from(sampled.sky) / 15.0,
-                        f32::from(sampled.block) / 15.0,
-                        face.shade(),
-                        f32::from(depth) / f32::from(DEPTH_SLICES - 1),
-                    ];
+                    let lighting = face_vertex_lighting(light, global_x, y, depth, face, &voxel_at);
                     builder.push_voxel_face(
                         local_x as f32,
                         y as f32,
@@ -343,7 +470,7 @@ pub fn build_chunk_meshes(
                         state,
                         variant,
                         face,
-                        color,
+                        lighting,
                     );
                 }
             }
@@ -357,23 +484,137 @@ pub fn build_chunk_meshes(
     }
 }
 
-fn face_light(
+fn face_vertex_lighting(
     light: &LightVolume,
     global_x: i64,
     y: i32,
     depth: u8,
     face: Face,
     voxel_at: &impl Fn(i64, i32, i32) -> Option<BlockState>,
+) -> [FaceVertexLight; 4] {
+    let (normal_x, normal_y, normal_depth) = face.neighbor();
+    let face_offset = VoxelOffset::new(normal_x, normal_y, normal_depth);
+    let face_position = offset_position(global_x, y, i32::from(depth), face_offset);
+    let base_light = sample_face_light(light, face_position, depth, voxel_at);
+    let mut sky_total = 0.0;
+    let mut block_total = 0.0;
+    let mut ao_total = 0;
+    for (side_a, side_b) in face.corner_tangents() {
+        let side_a_position = offset_position_tuple(face_position, side_a);
+        let side_b_position = offset_position_tuple(face_position, side_b);
+        let corner_position = offset_position_tuple(face_position, side_a.add(side_b));
+        let side_a_opaque = fully_opaque(side_a_position, voxel_at);
+        let side_b_opaque = fully_opaque(side_b_position, voxel_at);
+        let corner_opaque = fully_opaque(corner_position, voxel_at);
+        let samples = [
+            base_light,
+            light_or_base(
+                light,
+                side_a_position,
+                depth,
+                side_a_opaque,
+                base_light,
+                voxel_at,
+            ),
+            light_or_base(
+                light,
+                side_b_position,
+                depth,
+                side_b_opaque,
+                base_light,
+                voxel_at,
+            ),
+            light_or_base(
+                light,
+                corner_position,
+                depth,
+                corner_opaque,
+                base_light,
+                voxel_at,
+            ),
+        ];
+        sky_total += samples
+            .iter()
+            .map(|sample| f32::from(sample.sky))
+            .sum::<f32>()
+            / 4.0;
+        block_total += samples
+            .iter()
+            .map(|sample| f32::from(sample.block))
+            .sum::<f32>()
+            / 4.0;
+        ao_total += vertex_ao(side_a_opaque, side_b_opaque, corner_opaque);
+    }
+    let face_ao = (ao_total + 2) / 4;
+    [FaceVertexLight {
+        sky: sky_total / 4.0,
+        block: block_total / 4.0,
+        shade: face.shade() * AO_SHADE[face_ao],
+    }; 4]
+}
+
+fn offset_position(x: i64, y: i32, depth: i32, offset: VoxelOffset) -> (i64, i32, i32) {
+    (
+        x.saturating_add(i64::from(offset.x)),
+        y.saturating_add(offset.y),
+        depth.saturating_add(offset.depth),
+    )
+}
+
+fn offset_position_tuple(position: (i64, i32, i32), offset: VoxelOffset) -> (i64, i32, i32) {
+    offset_position(position.0, position.1, position.2, offset)
+}
+
+fn fully_opaque(
+    position: (i64, i32, i32),
+    voxel_at: &impl Fn(i64, i32, i32) -> Option<BlockState>,
+) -> bool {
+    voxel_at(position.0, position.1, position.2)
+        .is_some_and(|state| state.def().light_opacity >= MAX_LIGHT_LEVEL)
+}
+
+fn light_or_base(
+    light: &LightVolume,
+    position: (i64, i32, i32),
+    surface_depth: u8,
+    opaque: bool,
+    base: LightCell,
+    voxel_at: &impl Fn(i64, i32, i32) -> Option<BlockState>,
 ) -> LightCell {
-    let (dx, dy, dd) = face.neighbor();
-    let neighbor_depth = i32::from(depth) + dd;
-    if !(0..i32::from(DEPTH_SLICES)).contains(&neighbor_depth) {
-        return boundary_face_light(light, global_x, y, depth, voxel_at);
+    if opaque {
+        base
+    } else {
+        sample_face_light(light, position, surface_depth, voxel_at)
     }
-    if y + dy >= WORLD_HEIGHT {
-        return LightCell { sky: 15, block: 0 };
+}
+
+fn sample_face_light(
+    light: &LightVolume,
+    position: (i64, i32, i32),
+    surface_depth: u8,
+    voxel_at: &impl Fn(i64, i32, i32) -> Option<BlockState>,
+) -> LightCell {
+    if position.1 >= WORLD_HEIGHT {
+        return LightCell {
+            sky: MAX_LIGHT_LEVEL,
+            block: 0,
+        };
     }
-    light.get(global_x + i64::from(dx), y + dy, neighbor_depth as u8)
+    if position.1 < 0 {
+        return LightCell::default();
+    }
+    if !(0..i32::from(DEPTH_SLICES)).contains(&position.2) {
+        return boundary_face_light(light, position.0, position.1, surface_depth, voxel_at);
+    }
+    light.get(position.0, position.1, position.2 as u8)
+}
+
+fn vertex_ao(side_a: bool, side_b: bool, corner: bool) -> usize {
+    if side_a && side_b {
+        0
+    } else {
+        3 - usize::from(side_a) - usize::from(side_b) - usize::from(corner)
+    }
 }
 
 fn boundary_face_light(
@@ -455,7 +696,7 @@ impl VoxelMeshBuilder {
         state: BlockState,
         variant: u32,
         face: Face,
-        color: [f32; 4],
+        lighting: [FaceVertexLight; 4],
     ) {
         let front = -f32::from(depth) + 0.5;
         let back = front - 1.0;
@@ -500,37 +741,8 @@ impl VoxelMeshBuilder {
         let tile = ((u32::from(state.id().value()) - 1) * FACE_VARIANTS + face.texture_class())
             * ATLAS_VARIANTS
             + variant;
-        self.push_quad(corners, face.normal(), tile_uvs(tile), color);
-    }
-
-    fn push_torch(&mut self, x: f32, y: f32, variant: u32) {
-        let tile = ((u32::from(BlockState::TORCH.id().value()) - 1) * FACE_VARIANTS)
-            * ATLAS_VARIANTS
-            + variant;
-        let uvs = tile_uvs(tile);
-        let color = [1.0; 4];
-        self.push_quad(
-            [
-                [x + 0.18, y + 0.02, 0.06],
-                [x + 0.82, y + 0.02, 0.06],
-                [x + 0.82, y + 0.98, 0.06],
-                [x + 0.18, y + 0.98, 0.06],
-            ],
-            [0.0, 0.0, 1.0],
-            uvs,
-            color,
-        );
-        self.push_quad(
-            [
-                [x + 0.5, y + 0.02, -0.26],
-                [x + 0.5, y + 0.02, 0.38],
-                [x + 0.5, y + 0.98, 0.38],
-                [x + 0.5, y + 0.98, -0.26],
-            ],
-            [1.0, 0.0, 0.0],
-            uvs,
-            color,
-        );
+        let colors = lighting.map(|sample| sample.encoded(depth));
+        self.push_quad(corners, face.normal(), tile_uvs(tile), colors);
     }
 
     fn push_quad(
@@ -538,13 +750,13 @@ impl VoxelMeshBuilder {
         corners: [[f32; 3]; 4],
         normal: [f32; 3],
         uvs: [[f32; 2]; 4],
-        color: [f32; 4],
+        colors: [[f32; 4]; 4],
     ) {
         let base = self.positions.len() as u32;
         self.positions.extend_from_slice(&corners);
         self.normals.extend_from_slice(&[normal; 4]);
         self.uvs.extend_from_slice(&uvs);
-        self.colors.extend_from_slice(&[color; 4]);
+        self.colors.extend_from_slice(&colors);
         self.indices
             .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
@@ -560,6 +772,106 @@ impl VoxelMeshBuilder {
         .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, self.colors)
         .with_inserted_indices(Indices::U32(self.indices))
     }
+}
+
+#[derive(Default)]
+struct TorchMeshBuilder {
+    positions: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    effects: Vec<[f32; 4]>,
+    indices: Vec<u32>,
+}
+
+impl TorchMeshBuilder {
+    fn push_torch(&mut self, x: f32, y: f32, variant: u32, effect_seed: u64) {
+        let tile = ((u32::from(BlockState::TORCH.id().value()) - 1) * FACE_VARIANTS)
+            * ATLAS_VARIANTS
+            + variant;
+        let phase = (effect_seed & 0xffff) as f32 / u16::MAX as f32 * std::f32::consts::TAU;
+        let intensity = 0.9 + ((effect_seed >> 16) & 0xff) as f32 / 255.0 * 0.2;
+        let stem_effect = [0.0, phase, 0.0, intensity];
+        self.push_quad(
+            [
+                [x + 0.43, y + 0.05, 0.06],
+                [x + 0.57, y + 0.05, 0.06],
+                [x + 0.57, y + 0.72, 0.06],
+                [x + 0.43, y + 0.72, 0.06],
+            ],
+            tile_uvs(tile),
+            stem_effect,
+        );
+        self.push_quad(
+            [
+                [x + 0.5, y + 0.05, -0.01],
+                [x + 0.5, y + 0.05, 0.13],
+                [x + 0.5, y + 0.72, 0.13],
+                [x + 0.5, y + 0.72, -0.01],
+            ],
+            tile_uvs(tile),
+            stem_effect,
+        );
+
+        let flame_effect = [1.0, phase, 0.0, intensity];
+        self.push_quad(
+            [
+                [x + 0.39, y + 0.64, 0.065],
+                [x + 0.61, y + 0.64, 0.065],
+                [x + 0.61, y + 0.94, 0.065],
+                [x + 0.39, y + 0.94, 0.065],
+            ],
+            unit_uvs(),
+            flame_effect,
+        );
+        self.push_quad(
+            [
+                [x + 0.5, y + 0.64, -0.045],
+                [x + 0.5, y + 0.64, 0.175],
+                [x + 0.5, y + 0.94, 0.175],
+                [x + 0.5, y + 0.94, -0.045],
+            ],
+            unit_uvs(),
+            flame_effect,
+        );
+
+        for (index, drift) in [(-1.0, -0.035), (1.0, 0.035)] {
+            let center_x = x + 0.5 + drift;
+            let ember_phase = phase + index * 1.91;
+            self.push_quad(
+                [
+                    [center_x - 0.03, y + 0.92, 0.07],
+                    [center_x + 0.03, y + 0.92, 0.07],
+                    [center_x + 0.03, y + 0.98, 0.07],
+                    [center_x - 0.03, y + 0.98, 0.07],
+                ],
+                unit_uvs(),
+                [2.0, ember_phase, index, intensity],
+            );
+        }
+    }
+
+    fn push_quad(&mut self, corners: [[f32; 3]; 4], uvs: [[f32; 2]; 4], effect: [f32; 4]) {
+        let base = self.positions.len() as u32;
+        self.positions.extend_from_slice(&corners);
+        self.uvs.extend_from_slice(&uvs);
+        self.effects.extend_from_slice(&[effect; 4]);
+        self.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+
+    fn finish(self) -> Mesh {
+        Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+        )
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs)
+        .with_inserted_attribute(ATTRIBUTE_TORCH_EFFECT, self.effects)
+        .with_inserted_indices(Indices::U32(self.indices))
+    }
+}
+
+fn unit_uvs() -> [[f32; 2]; 4] {
+    [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]]
 }
 
 fn tile_uvs(tile: u32) -> [[f32; 2]; 4] {
@@ -581,14 +893,13 @@ fn classic_brightness(level: f32) -> f32 {
     0.05 + 0.95 * normalized / (4.0 - 3.0 * normalized)
 }
 
-fn generate_lightmap(daylight: f32) -> [LinearRgba; (LIGHTMAP_SIZE * LIGHTMAP_SIZE) as usize] {
+fn generate_lightmap(
+    daylight: f32,
+    palette: LightingPalette,
+) -> [LinearRgba; (LIGHTMAP_SIZE * LIGHTMAP_SIZE) as usize] {
     let daylight = daylight.clamp(0.0, 1.0);
     let global_sky_level = 4.0 + daylight * 11.0;
-    let sky_tint = [
-        mix(0.46, 1.0, daylight),
-        mix(0.56, 0.98, daylight),
-        mix(0.84, 0.92, daylight),
-    ];
+    let sky_tint = palette.skylight;
     let block_tint = [1.0, 0.58, 0.22];
     std::array::from_fn(|index| {
         let block = (index % LIGHTMAP_SIZE as usize) as u8;
@@ -606,6 +917,38 @@ fn generate_lightmap(daylight: f32) -> [LinearRgba; (LIGHTMAP_SIZE * LIGHTMAP_SI
             (sky_brightness * sky_tint[2]).max(block_brightness * block_tint[2]),
         )
     })
+}
+
+fn sample_lightmap(
+    colors: &[LinearRgba; (LIGHTMAP_SIZE * LIGHTMAP_SIZE) as usize],
+    block: f32,
+    sky: f32,
+) -> LinearRgba {
+    let block = block.clamp(0.0, 15.0);
+    let sky = sky.clamp(0.0, 15.0);
+    let block_low = block.floor() as u8;
+    let block_high = block.ceil() as u8;
+    let sky_low = sky.floor() as u8;
+    let sky_high = sky.ceil() as u8;
+    let lower = mix_color(
+        colors[lightmap_index(block_low, sky_low)],
+        colors[lightmap_index(block_high, sky_low)],
+        block.fract(),
+    );
+    let upper = mix_color(
+        colors[lightmap_index(block_low, sky_high)],
+        colors[lightmap_index(block_high, sky_high)],
+        block.fract(),
+    );
+    mix_color(lower, upper, sky.fract())
+}
+
+fn mix_color(start: LinearRgba, end: LinearRgba, amount: f32) -> LinearRgba {
+    LinearRgba::rgb(
+        start.red + (end.red - start.red) * amount,
+        start.green + (end.green - start.green) * amount,
+        start.blue + (end.blue - start.blue) * amount,
+    )
 }
 
 fn encode_lightmap(colors: &[LinearRgba; (LIGHTMAP_SIZE * LIGHTMAP_SIZE) as usize]) -> Vec<u8> {
@@ -637,20 +980,8 @@ fn lightmap_image(bytes: Vec<u8>) -> Image {
         TextureFormat::Rgba8Unorm,
         RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
     );
-    image.sampler = ImageSampler::nearest();
+    image.sampler = ImageSampler::linear();
     image
-}
-
-fn haze_color(daylight: f32) -> LinearRgba {
-    LinearRgba::rgb(
-        mix(NIGHT_HAZE[0], DAY_HAZE[0], daylight),
-        mix(NIGHT_HAZE[1], DAY_HAZE[1], daylight),
-        mix(NIGHT_HAZE[2], DAY_HAZE[2], daylight),
-    )
-}
-
-fn mix(start: f32, end: f32, amount: f32) -> f32 {
-    start + (end - start) * amount.clamp(0.0, 1.0)
 }
 
 fn atlas_image() -> Image {
@@ -751,20 +1082,12 @@ fn block_face_pixels(state: BlockState, variant: u8, face: u32) -> Vec<u8> {
 
 pub fn torch_pixels() -> Vec<u8> {
     let mut pixels = vec![0; (TEXTURE_SIZE * TEXTURE_SIZE * 4) as usize];
-    for y in 8..31 {
-        for x in 14..18 {
-            set_pixel(&mut pixels, x, y, [120, 69, 28, 255]);
-        }
-    }
-    for y in 1..12 {
-        let half_width = 2 + (11 - y) / 4;
-        for x in 16 - half_width..=16 + half_width {
-            let color = if y < 5 {
-                [255, 235, 122, 255]
-            } else if x % 2 == 0 {
-                [255, 170, 42, 255]
+    for y in 1_u32..31 {
+        for x in 13_u32..19 {
+            let color = if (x + y).is_multiple_of(7) {
+                [151, 89, 34, 255]
             } else {
-                [238, 82, 24, 255]
+                [104, 58, 24, 255]
             };
             set_pixel(&mut pixels, x, y, color);
         }
@@ -813,7 +1136,19 @@ mod tests {
     fn a_single_voxel_emits_six_faces() {
         let mut builder = VoxelMeshBuilder::default();
         for face in Face::ALL {
-            builder.push_voxel_face(0.0, 0.0, 0, BlockState::STONE, 0, face, [1.0; 4]);
+            builder.push_voxel_face(
+                0.0,
+                0.0,
+                0,
+                BlockState::STONE,
+                0,
+                face,
+                [FaceVertexLight {
+                    sky: 15.0,
+                    block: 0.0,
+                    shade: face.shade(),
+                }; 4],
+            );
         }
         let mesh = builder.finish();
         assert_eq!(mesh.count_vertices(), 24);
@@ -831,9 +1166,42 @@ mod tests {
     }
 
     #[test]
+    fn corner_ambient_occlusion_uses_classic_side_rule() {
+        assert_eq!(vertex_ao(false, false, false), 3);
+        assert_eq!(vertex_ao(false, false, true), 2);
+        assert_eq!(vertex_ao(true, false, true), 1);
+        assert_eq!(vertex_ao(true, true, false), 0);
+        assert_eq!(vertex_ao(true, true, true), 0);
+
+        let voxel_at = |_: i64, _: i32, depth: i32| match depth {
+            0 => Some(BlockState::STONE),
+            1 => Some(BlockState::LEAVES),
+            _ => None,
+        };
+        assert!(fully_opaque((0, 0, 0), &voxel_at));
+        assert!(!fully_opaque((0, 0, 1), &voxel_at));
+    }
+
+    #[test]
+    fn filtered_face_lighting_stays_uniform_after_ambient_occlusion() {
+        let voxel_at = |x: i64, y: i32, depth: i32| {
+            matches!((x, y, depth), (2, 1, 1) | (1, 2, 1) | (2, 2, 0)).then_some(BlockState::STONE)
+        };
+        let light = LightVolume::calculate(0, 5, 5, DEPTH_SLICES, |x, y, depth| {
+            voxel_at(x, y, i32::from(depth))
+        });
+        let samples = face_vertex_lighting(&light, 2, 1, 1, Face::Top, &voxel_at);
+
+        assert!(samples[0].shade < 1.0);
+        assert!(samples.iter().all(|sample| *sample == samples[0]));
+    }
+
+    #[test]
     fn lightmap_keeps_sky_and_block_channels_distinct() {
-        let noon = generate_lightmap(1.0);
-        let midnight = generate_lightmap(0.0);
+        let noon_day = crate::domain::DayCycle::from_ticks(6_000);
+        let midnight_day = crate::domain::DayCycle::from_ticks(18_000);
+        let noon = generate_lightmap(1.0, LightingPalette::from_day(&noon_day));
+        let midnight = generate_lightmap(0.0, LightingPalette::from_day(&midnight_day));
         let full_sky = noon[lightmap_index(0, 15)];
         let night_sky = midnight[lightmap_index(0, 15)];
         let torch = midnight[lightmap_index(12, 0)];
@@ -841,6 +1209,42 @@ mod tests {
         assert!(torch.red > torch.green);
         assert!(torch.green > torch.blue);
         assert_eq!(encode_lightmap(&noon).len(), 16 * 16 * 4);
+    }
+
+    #[test]
+    fn lightmap_sampling_interpolates_both_channels() {
+        let colors = std::array::from_fn(|index| {
+            let block = (index % LIGHTMAP_SIZE as usize) as f32;
+            let sky = (index / LIGHTMAP_SIZE as usize) as f32;
+            LinearRgba::rgb(block / 15.0, sky / 15.0, 0.0)
+        });
+        let sampled = sample_lightmap(&colors, 7.5, 3.25);
+        assert!((sampled.red - 0.5).abs() < 0.0001);
+        assert!((sampled.green - 3.25 / 15.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn torch_effect_mesh_is_batched_and_phases_are_deterministic() {
+        let mut first = TorchMeshBuilder::default();
+        first.push_torch(2.0, 3.0, 0, 42);
+        let first = first.finish();
+        let mut second = TorchMeshBuilder::default();
+        second.push_torch(2.0, 3.0, 0, 42);
+        let second = second.finish();
+
+        assert_eq!(first.count_vertices(), 24);
+        assert_eq!(first.indices().unwrap().len(), 36);
+        let Some(bevy::mesh::VertexAttributeValues::Float32x4(first_effects)) =
+            first.attribute(ATTRIBUTE_TORCH_EFFECT)
+        else {
+            panic!("torch effect attribute must be float32x4");
+        };
+        let Some(bevy::mesh::VertexAttributeValues::Float32x4(second_effects)) =
+            second.attribute(ATTRIBUTE_TORCH_EFFECT)
+        else {
+            panic!("torch effect attribute must be float32x4");
+        };
+        assert_eq!(first_effects, second_effects);
     }
 
     #[test]

@@ -150,9 +150,14 @@ struct BlockState {
   channels. Opaque voxels stop propagation; open cells spread light through
   their six orthogonal neighbors without leaking beyond the rendered depth
   bounds.
-- Voxel materials are unlit and sample the discrete light volume through a
-  nearest-neighbor lightmap. Day/night changes update that lightmap rather
-  than rebuilding chunk meshes.
+- Voxel materials are unlit. The texture atlas remains nearest-neighbor, while
+  neighborhood-filtered sky and block levels use a linearly sampled lightmap.
+  Each block face receives one uniform shade; interpolation never creates
+  gradients inside a face. Day/night changes update the lightmap rather than
+  rebuilding chunk meshes.
+- Ambient occlusion is a subtle quantized multiplier for an entire face.
+  Torch flames and embers animate in their chunk-batched material without
+  changing propagated light or creating per-block render entities.
 - Sun and moon visuals stay camera-aligned and communicate the clock state.
   They do not drive directional PBR lights or cast smooth real-time shadows.
 

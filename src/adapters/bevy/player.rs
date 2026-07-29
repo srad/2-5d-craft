@@ -6,7 +6,7 @@ use crate::adapters::bevy::{
 };
 use crate::{
     AppState,
-    domain::{BlockState, CHUNK_WIDTH},
+    domain::{BlockState, CHUNK_WIDTH, LightCell},
 };
 use avian2d::{math::*, prelude::*};
 use bevy::ecs::query::Has;
@@ -385,12 +385,9 @@ fn update_player_lighting(
     catalog: Res<RenderCatalog>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let global_x = world
-        .origin_chunk()
-        .saturating_mul(i64::from(CHUNK_WIDTH))
-        .saturating_add(player.translation.x.floor() as i64);
-    let y = player.translation.y.floor() as i32;
-    let tint = lightmap.sample(light.get(global_x, y, 0));
+    let (block, sky) =
+        interpolated_player_light(&light, world.origin_chunk(), player.translation.truncate());
+    let tint = lightmap.sample_levels(block, sky);
     for (handle, base) in catalog.player_materials.iter().zip(catalog.player_palette) {
         if let Some(mut material) = materials.get_mut(handle) {
             material.base_color = Color::linear_rgba(
@@ -401,6 +398,44 @@ fn update_player_lighting(
             );
         }
     }
+}
+
+fn interpolated_player_light(
+    light: &crate::domain::LightVolume,
+    origin_chunk: i64,
+    local_position: Vec2,
+) -> (f32, f32) {
+    let sample_x = local_position.x - 0.5;
+    let sample_y = local_position.y + 0.35 - 0.5;
+    let (local_x, fraction_x) = cell_axis(sample_x);
+    let (y, fraction_y) = cell_axis(sample_y);
+    let y = y as i32;
+    let global_x = origin_chunk
+        .saturating_mul(i64::from(CHUNK_WIDTH))
+        .saturating_add(local_x);
+    let samples = [
+        light.get(global_x, y, 0),
+        light.get(global_x.saturating_add(1), y, 0),
+        light.get(global_x, y.saturating_add(1), 0),
+        light.get(global_x.saturating_add(1), y.saturating_add(1), 0),
+    ];
+    blend_light_samples(samples, fraction_x, fraction_y)
+}
+
+fn cell_axis(value: f32) -> (i64, f32) {
+    let cell = value.floor();
+    (cell as i64, value - cell)
+}
+
+fn blend_light_samples(samples: [LightCell; 4], fraction_x: f32, fraction_y: f32) -> (f32, f32) {
+    let blend = |channel: fn(LightCell) -> u8| {
+        let bottom = f32::from(channel(samples[0]))
+            + (f32::from(channel(samples[1])) - f32::from(channel(samples[0]))) * fraction_x;
+        let top = f32::from(channel(samples[2]))
+            + (f32::from(channel(samples[3])) - f32::from(channel(samples[2]))) * fraction_x;
+        bottom + (top - bottom) * fraction_y
+    };
+    (blend(|cell| cell.block), blend(|cell| cell.sky))
 }
 
 pub fn move_towards(current: f32, target: f32, maximum_delta: f32) -> f32 {
@@ -431,6 +466,27 @@ mod tests {
             };
             assert_eq!(hotbar.selected_state().def().hotbar_slot, Some(slot));
         }
+    }
+
+    #[test]
+    fn player_light_coordinates_blend_across_negative_cells() {
+        assert_eq!(cell_axis(1.25), (1, 0.25));
+        let (cell, fraction) = cell_axis(-1.25);
+        assert_eq!(cell, -2);
+        assert!((fraction - 0.75).abs() < 0.0001);
+
+        let (block, sky) = blend_light_samples(
+            [
+                LightCell { sky: 0, block: 0 },
+                LightCell { sky: 4, block: 6 },
+                LightCell { sky: 8, block: 10 },
+                LightCell { sky: 12, block: 14 },
+            ],
+            0.5,
+            0.5,
+        );
+        assert_eq!(block, 7.5);
+        assert_eq!(sky, 6.0);
     }
 
     #[test]

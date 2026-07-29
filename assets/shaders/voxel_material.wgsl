@@ -30,8 +30,8 @@ fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
-    let sky = round(mesh.color.r * 15.0);
-    let block = round(mesh.color.g * 15.0);
+    let sky = clamp(mesh.color.r * 15.0, 0.0, 15.0);
+    let block = clamp(mesh.color.g * 15.0, 0.0, 15.0);
     let light_uv = (vec2(block, sky) + vec2(0.5)) / 16.0;
     let light = textureSample(lightmap_texture, lightmap_sampler, light_uv).rgb;
     let style = depth_style(u32(round(mesh.color.a * 3.0)));

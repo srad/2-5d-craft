@@ -12,18 +12,19 @@ use crate::{
         DayCycleResource, LightVolumeResource, PendingWorldResource, RuntimeSet,
         WorldSessionResource, WorldStateResource,
         camera::{CameraRig, GameCamera, center_camera},
+        environment_flag,
         lighting::configured_start_time,
         player::{Player, RespawnPoint},
         rendering::{RenderCatalog, build_chunk_collider, build_chunk_meshes},
     },
     application::{
-        SaveVersion, StreamConfig, WorldId, WorldSession, WorldState, plan_generation_requests,
-        plan_unloads, result_is_still_requested,
+        SaveVersion, StreamConfig, WorldId, WorldSession, WorldState, place_block,
+        plan_generation_requests, plan_unloads, result_is_still_requested,
     },
     domain::{
-        BlockChunk, CHUNK_WIDTH, ChunkChange, ChunkLayer, DEPTH_SLICES, LightVolume,
-        MAX_LIGHT_LEVEL, MutationReport, VoxelLayer, VoxelPos, generate_chunk_at, generated_voxel,
-        world_to_chunk,
+        BlockChunk, BlockState, CHUNK_WIDTH, ChunkChange, ChunkLayer, DEPTH_SLICES, LightVolume,
+        MAX_LIGHT_LEVEL, MutationReport, VoxelLayer, VoxelPos, WORLD_HEIGHT, generate_chunk_at,
+        generated_voxel, world_to_chunk,
     },
 };
 
@@ -141,7 +142,17 @@ fn spawn_pending_world(
         return;
     };
     day.0 = configured_start_time(pending.snapshot.day_time_ticks);
-    let initialized = WorldState::from_snapshot(&pending.snapshot);
+    let mut initialized = WorldState::from_snapshot(&pending.snapshot);
+    let fixture_report = (environment_flag("SIDECRAFT_AUTOSTART")
+        && environment_flag("SIDECRAFT_TEST_TORCH_FIXTURE"))
+    .then(|| {
+        place_test_torch(
+            &mut initialized.state,
+            pending.snapshot.player.chunk_x,
+            pending.snapshot.player.local_x,
+        )
+    })
+    .flatten();
     commands.insert_resource(LightVolumeResource(calculate_light_volume(
         &initialized.state,
     )));
@@ -163,6 +174,44 @@ fn spawn_pending_world(
         world_id: pending.id.clone(),
         report: initialized.report,
     });
+    if let Some(report) = fixture_report {
+        mutations.write(WorldMutationMessage {
+            world_id: pending.id.clone(),
+            report,
+        });
+    }
+}
+
+fn place_test_torch(
+    world: &mut WorldState,
+    origin_chunk: i64,
+    local_player_x: f32,
+) -> Option<MutationReport> {
+    let player_x = origin_chunk
+        .saturating_mul(i64::from(CHUNK_WIDTH))
+        .saturating_add(local_player_x.floor() as i64);
+    for offset in [3_i64, 4, 5, -3, -4, -5] {
+        let x = player_x.saturating_add(offset);
+        if !world
+            .view()
+            .contains_chunk(ChunkLayer::foreground(world_to_chunk(x)))
+        {
+            continue;
+        }
+        for y in (1..WORLD_HEIGHT).rev() {
+            let position = VoxelPos::foreground(x, y);
+            let supported = world
+                .view()
+                .block(VoxelPos::foreground(x, y - 1))
+                .is_some_and(|state| state.def().solid);
+            if world.view().block(position).is_none() && supported {
+                return place_block(world, position, BlockState::TORCH)
+                    .ok()
+                    .map(|result| result.report);
+            }
+        }
+    }
+    None
 }
 
 fn finish_loading_world(

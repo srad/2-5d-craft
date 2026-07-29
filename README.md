@@ -76,14 +76,17 @@ unsupported torches, and blocks overlapping the player.
 - Hardness-based mining and adjacent-face placement.
 - Eight block hotbar, including placeable light-emitting torches.
 - Minecraft-style four-depth lighting with separate 0-15 sky and block
-  channels, six-neighbor propagation, opaque-cell occlusion, light-aware player
-  colors, and targeted chunk refresh after world changes.
+  channels, six-neighbor propagation, opaque-cell occlusion, neighborhood-
+  filtered whole-face shading, subtle quantized ambient occlusion, light-aware
+  player colors, and targeted chunk refresh after world changes.
 - Moving clouds, bloom, HDR tonemapping, four-sample MSAA, and an exact
   20-minute, 24,000-tick day/night cycle with a visible pixel-art sun, stars,
-  and eight persistent moon phases.
+  eight persistent moon phases, stronger cyclic color moods, and animated
+  chunk-batched torch flames.
 - A runtime-built, guttered texture atlas with deterministic material variants,
-  nearest-neighbor voxel lightmap sampling, directional face shading, and four
-  depth-specific exposure and haze levels.
+  nearest-neighbor block textures, linearly sampled lighting, directional face
+  shading, and four depth-specific exposure and haze levels. Individual block
+  faces remain flat-shaded without within-face gradients.
 - Main menu, world selection, HUD, and pause/save controls. Button actions are
   triggered only by Bevy's `Interaction::Pressed` state.
 - Autosave after changed world data, save on pause, and save-aware window
@@ -182,6 +185,7 @@ $env:SIDECRAFT_AUTOSTART = "1"
 $env:SIDECRAFT_AUTOCAPTURE = "1"
 $env:SIDECRAFT_TEST_SEED = "9"
 $env:SIDECRAFT_TEST_DAY_TICKS = "18000"
+$env:SIDECRAFT_TEST_TORCH_FIXTURE = "1"
 $env:SIDECRAFT_SCREENSHOT = "sidecraft-e2e.png"
 cargo run
 ```
@@ -193,7 +197,9 @@ captures can target sunrise (`0`), noon (`6000`), sunset (`12000`), midnight
 (`18000`), or a later moon phase exactly. Invalid or missing overrides retain
 the normal random seed and advancing clock. Without autostart, startup follows
 the normal main-menu flow. The rendered smoke test still requires a real window
-and graphics adapter.
+and graphics adapter. `SIDECRAFT_TEST_TORCH_FIXTURE` is also autostart-only; it
+places one supported surface torch through the normal mutation boundary so the
+block-light and animated torch pipelines are exercised by GPU validation.
 
 ## Current scope
 
