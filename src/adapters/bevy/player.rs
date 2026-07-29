@@ -1,10 +1,13 @@
 use crate::adapters::bevy::{
-    PendingWorldResource, WorldStateResource,
+    LightVolumeResource, PendingWorldResource, WorldStateResource,
     camera::{CameraRig, GameCamera, center_camera},
-    rendering::RenderCatalog,
+    rendering::{RenderCatalog, VoxelLightmap},
     world::WorldEntity,
 };
-use crate::{AppState, domain::BlockState};
+use crate::{
+    AppState,
+    domain::{BlockState, CHUNK_WIDTH},
+};
 use avian2d::{math::*, prelude::*};
 use bevy::ecs::query::Has;
 use bevy::prelude::*;
@@ -89,7 +92,11 @@ impl Plugin for PlayerPlugin {
                     .chain()
                     .run_if(in_state(AppState::Playing)),
             )
-            .add_systems(Update, animate_player.run_if(in_state(AppState::Playing)));
+            .add_systems(Update, animate_player.run_if(in_state(AppState::Playing)))
+            .add_systems(
+                PostUpdate,
+                update_player_lighting.run_if(in_state(AppState::Playing)),
+            );
     }
 }
 
@@ -366,6 +373,32 @@ fn animate_player(
         };
         if matches!(part, PlayerPart::LeftArm | PlayerPart::RightArm) {
             transform.translation.y = 0.08;
+        }
+    }
+}
+
+fn update_player_lighting(
+    player: Single<&Transform, With<Player>>,
+    world: Res<WorldStateResource>,
+    light: Res<LightVolumeResource>,
+    lightmap: Res<VoxelLightmap>,
+    catalog: Res<RenderCatalog>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let global_x = world
+        .origin_chunk()
+        .saturating_mul(i64::from(CHUNK_WIDTH))
+        .saturating_add(player.translation.x.floor() as i64);
+    let y = player.translation.y.floor() as i32;
+    let tint = lightmap.sample(light.get(global_x, y, 0));
+    for (handle, base) in catalog.player_materials.iter().zip(catalog.player_palette) {
+        if let Some(mut material) = materials.get_mut(handle) {
+            material.base_color = Color::linear_rgba(
+                base.red * tint.red,
+                base.green * tint.green,
+                base.blue * tint.blue,
+                base.alpha,
+            );
         }
     }
 }

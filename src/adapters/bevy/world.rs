@@ -9,10 +9,10 @@ use bevy::{
 use crate::{
     AppState,
     adapters::bevy::{
-        DayCycleResource, LightGridResource, PendingWorldResource, RuntimeSet,
+        DayCycleResource, LightVolumeResource, PendingWorldResource, RuntimeSet,
         WorldSessionResource, WorldStateResource,
         camera::{CameraRig, GameCamera, center_camera},
-        lighting::{SkyLightLevelChanged, configured_start_time},
+        lighting::configured_start_time,
         player::{Player, RespawnPoint},
         rendering::{RenderCatalog, build_chunk_collider, build_chunk_meshes},
     },
@@ -21,8 +21,9 @@ use crate::{
         plan_unloads, result_is_still_requested,
     },
     domain::{
-        BlockChunk, CHUNK_WIDTH, ChunkChange, ChunkLayer, LightGrid, MutationReport, VoxelLayer,
-        VoxelPos, generate_chunk_at, world_to_chunk,
+        BlockChunk, CHUNK_WIDTH, ChunkChange, ChunkLayer, DEPTH_SLICES, LightVolume,
+        MAX_LIGHT_LEVEL, MutationReport, VoxelLayer, VoxelPos, generate_chunk_at, generated_voxel,
+        world_to_chunk,
     },
 };
 
@@ -117,8 +118,7 @@ impl Plugin for WorldPlugin {
             )
             .add_systems(
                 Update,
-                (invalidate_daylight_meshes, refresh_lighting)
-                    .chain()
+                refresh_lighting
                     .in_set(RuntimeSet::Derived)
                     .run_if(in_state(AppState::Playing)),
             )
@@ -142,8 +142,8 @@ fn spawn_pending_world(
     };
     day.0 = configured_start_time(pending.snapshot.day_time_ticks);
     let initialized = WorldState::from_snapshot(&pending.snapshot);
-    commands.insert_resource(LightGridResource(LightGrid::calculate(
-        &initialized.state.view(),
+    commands.insert_resource(LightVolumeResource(calculate_light_volume(
+        &initialized.state,
     )));
     commands.insert_resource(WorldStateResource(initialized.state));
     commands.insert_resource(WorldSessionResource(WorldSession {
@@ -403,7 +403,7 @@ fn mutation_neighbors(position: VoxelPos) -> [VoxelPos; 5] {
 }
 
 fn refresh_lighting(
-    mut light: Option<ResMut<LightGridResource>>,
+    mut light: Option<ResMut<LightVolumeResource>>,
     world: Option<Res<WorldStateResource>>,
     mut dirty: Option<ResMut<WorldDirtySets>>,
 ) {
@@ -411,37 +411,47 @@ fn refresh_lighting(
         return;
     };
     if !dirty.lighting.is_empty() {
-        light.0 = LightGrid::calculate(&world.view());
+        let next = calculate_light_volume(&world);
+        let changed = light.0.changed_x_columns(&next);
+        light.0 = next;
+        mark_light_columns_dirty(changed, dirty);
         dirty.lighting.clear();
     }
 }
 
-fn invalidate_daylight_meshes(
-    mut changes: MessageReader<SkyLightLevelChanged>,
-    world: Option<Res<WorldStateResource>>,
-    mut dirty: Option<ResMut<WorldDirtySets>>,
-) {
-    if changes.read().next().is_none() {
-        return;
-    }
-    let (Some(world), Some(dirty)) = (world, dirty.as_mut()) else {
-        return;
+fn calculate_light_volume(world: &WorldState) -> LightVolume {
+    let view = world.view();
+    let Some((loaded_min_x, loaded_max_x)) = view.loaded_x_bounds() else {
+        return LightVolume::empty();
     };
-    mark_daylight_dirty(world.view().loaded_chunks(), dirty);
+    let halo = i64::from(MAX_LIGHT_LEVEL);
+    let min_x = loaded_min_x.saturating_sub(halo);
+    let max_x = loaded_max_x.saturating_add(halo);
+    let seed = world.seed();
+    LightVolume::calculate(min_x, max_x, view.height(), DEPTH_SLICES, |x, y, depth| {
+        if depth == 0 && view.contains_chunk(ChunkLayer::foreground(world_to_chunk(x))) {
+            view.block(VoxelPos::foreground(x, y))
+        } else {
+            generated_voxel(seed, x, y, depth)
+        }
+    })
 }
 
-fn mark_daylight_dirty(loaded_chunks: impl Iterator<Item = i64>, dirty: &mut WorldDirtySets) {
-    dirty
-        .render
-        .extend(loaded_chunks.map(ChunkLayer::foreground));
+fn mark_light_columns_dirty(changed_x: impl IntoIterator<Item = i64>, dirty: &mut WorldDirtySets) {
+    for x in changed_x {
+        for sample_x in [x.saturating_sub(1), x, x.saturating_add(1)] {
+            dirty
+                .render
+                .insert(ChunkLayer::foreground(world_to_chunk(sample_x)));
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn refresh_chunk_scenes(
     mut commands: Commands,
     catalog: Option<Res<RenderCatalog>>,
-    light: Option<Res<LightGridResource>>,
-    day: Res<DayCycleResource>,
+    light: Option<Res<LightVolumeResource>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut retired: ResMut<RetiredMeshAssets>,
     world: Option<Res<WorldStateResource>>,
@@ -476,7 +486,7 @@ fn refresh_chunk_scenes(
         let transform = Transform::from_xyz((local_chunk * CHUNK_WIDTH) as f32, 0.0, 0.0);
         let is_new = !presentation.chunk_scenes.contains_key(&chunk.chunk_x);
         let rebuilt = (rebuild_render || is_new)
-            .then(|| build_chunk_meshes(&world.view(), chunk.chunk_x, world.seed(), &light, &day));
+            .then(|| build_chunk_meshes(&world.view(), chunk.chunk_x, world.seed(), &light));
         let collider = (rebuild_collision || is_new)
             .then(|| build_chunk_collider(&world.view(), chunk.chunk_x));
         if let Some(scene) = presentation.chunk_scenes.get_mut(&chunk.chunk_x) {
@@ -575,13 +585,13 @@ fn refresh_chunk_scenes(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn update_chunk_layer(
+fn update_chunk_layer<M: Material>(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     retired: &mut RetiredMeshAssets,
     layer: &mut Option<ChunkRenderLayer>,
     mesh: Mesh,
-    material: &Handle<StandardMaterial>,
+    material: &Handle<M>,
     transform: Transform,
     chunk_x: i64,
 ) {
@@ -663,7 +673,7 @@ fn cleanup_world(
     commands.remove_resource::<WorldSessionResource>();
     commands.remove_resource::<WorldPresentation>();
     commands.remove_resource::<WorldDirtySets>();
-    commands.remove_resource::<LightGridResource>();
+    commands.remove_resource::<LightVolumeResource>();
     commands.remove_resource::<PendingWorldResource>();
 }
 
@@ -735,18 +745,14 @@ mod tests {
     }
 
     #[test]
-    fn daylight_changes_only_dirty_loaded_render_meshes() {
+    fn changed_light_columns_dirty_faces_across_chunk_boundaries() {
         let mut dirty = WorldDirtySets::default();
 
-        mark_daylight_dirty([-2, 0, 3].into_iter(), &mut dirty);
+        mark_light_columns_dirty([31], &mut dirty);
 
         assert_eq!(
             dirty.render,
-            BTreeSet::from([
-                ChunkLayer::foreground(-2),
-                ChunkLayer::foreground(0),
-                ChunkLayer::foreground(3),
-            ])
+            BTreeSet::from([ChunkLayer::foreground(0), ChunkLayer::foreground(1),])
         );
         assert!(dirty.lighting.is_empty());
         assert!(dirty.collision.is_empty());

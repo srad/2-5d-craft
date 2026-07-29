@@ -34,9 +34,6 @@ enum CelestialBody {
 #[derive(Component)]
 struct Cloud;
 
-#[derive(Component)]
-struct EnvironmentLight;
-
 #[derive(Resource)]
 struct MoonMaterials(Vec<Handle<StandardMaterial>>);
 
@@ -51,7 +48,7 @@ type EnvironmentVisualQuery<'w, 's> = Query<
         Option<&'static CelestialBody>,
         Option<&'static Cloud>,
     ),
-    (With<EnvironmentVisual>, Without<EnvironmentLight>),
+    With<EnvironmentVisual>,
 >;
 
 pub(crate) struct EnvironmentPlugin;
@@ -164,29 +161,17 @@ fn setup_environment(
             ));
         }
     });
-
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 9_000.0,
-            shadow_maps_enabled: true,
-            ..default()
-        },
-        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.8, -0.4, 0.0)),
-        EnvironmentLight,
-    ));
 }
 
-#[allow(clippy::too_many_arguments)]
 fn animate_environment(
     time: Res<Time>,
     day: Res<DayCycleResource>,
     moon_materials: Res<MoonMaterials>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut camera: Single<(&mut AmbientLight, &Projection, &GlobalTransform), With<GameCamera>>,
+    camera: Single<&Projection, With<GameCamera>>,
     mut visuals: EnvironmentVisualQuery,
-    mut light: Single<(&mut DirectionalLight, &mut Transform), With<EnvironmentLight>>,
 ) {
-    let Projection::Orthographic(projection) = camera.1 else {
+    let Projection::Orthographic(projection) = *camera else {
         return;
     };
     let half_view = projection.area.half_size();
@@ -236,32 +221,19 @@ fn animate_environment(
             }
         }
     }
+}
 
-    camera.0.brightness = lerp(25.0, 140.0, day.daylight());
-    light.0.illuminance = lerp(300.0, 9_000.0, day.daylight());
-    light.0.color = Color::srgb(
-        lerp(0.46, 1.0, day.daylight()),
-        lerp(0.56, 0.98, day.daylight()),
-        lerp(0.84, 0.92, day.daylight()),
-    );
-
-    let active = if day.sun_elevation() >= 0.0 {
-        sun_position
-    } else {
-        moon_position
-    };
-    let local_direction = Vec3::new(-active.x, -active.y, 24.0).normalize();
-    let world_direction = camera.2.rotation() * local_direction;
-    light.1.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, world_direction);
+fn celestial_orbit(phase: f32) -> Vec2 {
+    let angle = phase * std::f32::consts::TAU;
+    Vec2::new(-angle.cos(), angle.sin())
 }
 
 fn celestial_positions(phase: f32, half_view: Vec2) -> (Vec2, Vec2) {
-    let angle = phase * std::f32::consts::TAU;
     let radii = Vec2::new(
         (half_view.x - BODY_SIZE).max(4.0) * 0.88,
         (half_view.y - BODY_SIZE * 0.5).max(3.0) * 0.82,
     );
-    let sun = Vec2::new(-angle.cos() * radii.x, angle.sin() * radii.y);
+    let sun = celestial_orbit(phase) * radii;
     (sun, -sun)
 }
 

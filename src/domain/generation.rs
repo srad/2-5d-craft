@@ -185,4 +185,12 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(samples.iter().any(|heights| heights[0] != heights[1]));
     }
+
+    #[test]
+    fn visual_capture_seed_exposes_all_depth_profiles_at_spawn() {
+        let heights: Vec<_> = (0..DEPTH_SLICES)
+            .map(|depth| surface_height_at_depth(9, 0, depth))
+            .collect();
+        assert_eq!(heights, [41, 40, 37, 34]);
+    }
 }

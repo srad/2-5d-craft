@@ -10,7 +10,7 @@ pub use generation::{
     generate_chunk, generated_voxel, spawn_for_seed, stable_hash, surface_height,
     surface_height_at_depth,
 };
-pub use lighting::{LightCell, LightGrid};
+pub use lighting::{LightCell, LightVolume, MAX_LIGHT_LEVEL};
 pub use targeting::{BlockTarget, target_from_ray, tile_overlaps_player};
 pub use time::{
     DayCycle, MIDNIGHT_TICKS, MoonPhase, NOON_TICKS, SUNRISE_TICKS, SUNSET_TICKS, TICKS_PER_DAY,

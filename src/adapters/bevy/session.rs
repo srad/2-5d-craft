@@ -6,8 +6,8 @@ use bevy::prelude::*;
 use crate::{
     AppState,
     adapters::bevy::{
-        PendingWorldResource, RepositoryHandle, WorldCatalogResource, save::SaveRequest,
-        ui::UiStatus,
+        PendingWorldResource, RepositoryHandle, WorldCatalogResource, configured_autostart_u64,
+        save::SaveRequest, ui::UiStatus,
     },
     application::{SaveDestination, WorldId, blank_snapshot},
     domain::spawn_for_seed,
@@ -49,7 +49,8 @@ fn handle_session_commands(
     for message in messages.read() {
         match message {
             SessionCommand::NewWorld => {
-                let seed = rand::random::<u64>();
+                let seed = configured_autostart_u64("SIDECRAFT_TEST_SEED")
+                    .unwrap_or_else(rand::random::<u64>);
                 let snapshot = blank_snapshot(
                     seed,
                     format!("World {:08X}", seed as u32),

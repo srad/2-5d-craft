@@ -23,9 +23,9 @@ caves, water, plants, and technology progression of
 - Active item: none
 - Next item: M1.3 — add one local PowerShell quality-gate command
 - Blocker: none
-- Last completed milestone: M6 — Minecraft-style day/night presentation
+- Last completed milestone: M6 — block lighting and side-on 2.5D presentation
 - Verification baseline: confirmed 2026-07-29; formatting, Clippy with warnings
-  denied, 66 automated tests, the release build, and real-GPU day/night captures
+  denied, 76 automated tests, the release build, and real-GPU day/night captures
   passed locally
 
 At the start of a work session, mark exactly one item `[~]`. At the end, change
@@ -119,7 +119,8 @@ local gates pass.
 - `[ ]` Initialize both layers from depths 0 and 1 of the 3D generator.
 - `[ ]` Keep depths 2 and 3 generator-derived and render-only.
 - `[ ]` Make the backwall editable and persistent without creating colliders.
-- `[ ]` Include the backwall in lighting and depth-aware material presentation.
+- `[ ]` Connect authoritative backwall mutations to the existing four-depth
+  light volume and depth-aware material presentation.
 - `[ ]` Default interaction to foreground; use `Tab` to select backwall and
   show the active layer in the HUD.
 - `[ ]` Test overlapping foreground/backwall blocks, negative coordinates,
@@ -251,9 +252,17 @@ engine form a coherent living-builder loop.
 
 - `[x]` Add an exact 20-minute, 24,000-tick day/night presentation with a
   visible pixel-art sun, stars, eight persistent moon phases, celestial
-  lighting, clock-aware saves, and discrete chunk-light refresh.
-- `[ ]` Refine low-poly block materials, face variation, bevel/highlight cues,
-  depth fog, ambient depth, and shadows.
+  presentation, clock-aware saves, and lightmap-only clock refresh.
+- `[x]` Establish side-on 2.5D voxel composition with a fixed 10-degree yaw,
+  14-degree downward pitch, view-space camera snapping, directional face
+  separation, and depth haze.
+- `[x]` Replace smooth PBR world lighting with a four-depth, dual-channel 0-15
+  light volume, six-neighbor sky and block propagation, nearest-neighbor voxel
+  lightmap sampling, targeted invalidation, and light-aware player materials.
+- `[ ]` Add Minecraft-style corner ambient occlusion and smooth per-vertex
+  light interpolation without reintroducing real-time PBR world lights.
+- `[ ]` Refine low-poly block materials, face variation, and bevel/highlight
+  cues.
 - `[ ]` Add fluid surfaces, falling-block interpolation, plant animation,
   particles, weather effects, and responsive interaction feedback.
 - `[ ]` Add music, ambient sound, interaction audio, and volume controls.

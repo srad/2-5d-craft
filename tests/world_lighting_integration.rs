@@ -1,10 +1,23 @@
 use sidecraft::{
     application::{ChunkSnapshot, blank_snapshot},
     domain::{
-        BlockChunk, BlockGrid, CHUNK_WIDTH, LightGrid, VoxelPos, WORLD_HEIGHT, WorldMutator,
-        generate_chunk, spawn_for_seed,
+        BlockChunk, BlockGrid, CHUNK_WIDTH, ChunkLayer, DEPTH_SLICES, LightVolume, VoxelPos,
+        WORLD_HEIGHT, WorldMutator, generate_chunk, generated_voxel, spawn_for_seed,
+        world_to_chunk,
     },
 };
+
+fn calculate_light(seed: u64, grid: &BlockGrid) -> LightVolume {
+    let view = grid.view();
+    let (min_x, max_x) = view.loaded_x_bounds().unwrap();
+    LightVolume::calculate(min_x, max_x, WORLD_HEIGHT, DEPTH_SLICES, |x, y, depth| {
+        if depth == 0 && view.contains_chunk(ChunkLayer::foreground(world_to_chunk(x))) {
+            view.block(VoxelPos::foreground(x, y))
+        } else {
+            generated_voxel(seed, x, y, depth)
+        }
+    })
+}
 
 #[test]
 fn persisted_chunks_reconstruct_the_same_light_field() {
@@ -13,7 +26,7 @@ fn persisted_chunks_reconstruct_the_same_light_field() {
     for chunk in &chunks {
         WorldMutator::new(&mut grid).integrate_chunk(chunk.clone());
     }
-    let before = LightGrid::calculate(&grid.view());
+    let before = calculate_light(41, &grid);
     let save = blank_snapshot(
         41,
         "Lighting integration".into(),
@@ -32,12 +45,16 @@ fn persisted_chunks_reconstruct_the_same_light_field() {
         WorldMutator::new(&mut reconstructed)
             .integrate_chunk(BlockChunk::from_dense(chunk.x, chunk.blocks).unwrap());
     }
-    let after = LightGrid::calculate(&reconstructed.view());
+    let after = calculate_light(41, &reconstructed);
 
-    for y in 0..WORLD_HEIGHT {
-        for x in -CHUNK_WIDTH..CHUNK_WIDTH * 2 {
-            let position = VoxelPos::foreground(i64::from(x), y);
-            assert_eq!(after.get(position), before.get(position));
+    for depth in 0..DEPTH_SLICES {
+        for y in 0..WORLD_HEIGHT {
+            for x in -CHUNK_WIDTH..CHUNK_WIDTH * 2 {
+                assert_eq!(
+                    after.get(i64::from(x), y, depth),
+                    before.get(i64::from(x), y, depth)
+                );
+            }
         }
     }
 }

@@ -4,7 +4,10 @@ use sidecraft::{
     application::{
         WorldRepository, WorldState, blank_snapshot, break_block, place_block, validate_snapshot,
     },
-    domain::{BlockState, DayCycle, LightGrid, VoxelPos, spawn_for_seed, surface_height},
+    domain::{
+        BlockState, ChunkLayer, DEPTH_SLICES, DayCycle, LightVolume, VoxelPos, WORLD_HEIGHT,
+        generated_voxel, spawn_for_seed, surface_height, world_to_chunk,
+    },
 };
 
 #[test]
@@ -53,12 +56,16 @@ fn new_world_edit_save_and_reload_lifecycle() {
         spawn + Vec2::new(2.0, 1.0)
     );
     assert_eq!(reloaded.day_time_ticks, 123_456_789);
-    assert!(
-        LightGrid::calculate(&reconstructed.view())
-            .visible_at(&reconstructed.view(), placed)
-            .sky
-            > 0
-    );
+    let view = reconstructed.view();
+    let (min_x, max_x) = view.loaded_x_bounds().unwrap();
+    let light = LightVolume::calculate(min_x, max_x, WORLD_HEIGHT, DEPTH_SLICES, |x, y, depth| {
+        if depth == 0 && view.contains_chunk(ChunkLayer::foreground(world_to_chunk(x))) {
+            view.block(VoxelPos::foreground(x, y))
+        } else {
+            generated_voxel(seed, x, y, depth)
+        }
+    });
+    assert!(light.get(placed.global_x, placed.y + 1, 0).sky > 0);
 
     let listed = repository.list().unwrap();
     assert_eq!(listed.valid.len(), 1);

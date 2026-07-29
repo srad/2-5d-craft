@@ -6,9 +6,12 @@ foundation with generated terrain, movement, mining, placement, lighting, and
 durable world saves.
 
 The world is generated and rendered as real 3D voxels, while movement and
-interaction remain side-on. The intended result is a polished, low-poly world
-with an editable foreground, an editable backwall, and generated scenery behind
-them—not a flat 2D tile map or a free-camera Minecraft clone.
+interaction remain side-on. A fixed orthographic camera uses a restrained
+10-degree yaw and 14-degree downward pitch to retain narrow top and right-face
+depth cues without losing the side-view composition. Depth-aware haze keeps the
+editable foreground visually dominant. The intended result is a polished,
+low-poly world with an editable foreground, an editable backwall, and generated
+scenery behind them—not a flat 2D tile map or a free-camera Minecraft clone.
 
 The product direction is a systemic living-builder focused on homesteading,
 crafting and technology, exploration, climate, fluids, gravity, and plant
@@ -72,11 +75,15 @@ unsupported torches, and blocks overlapping the player.
   collision sliding, world bounds, and fall recovery.
 - Hardness-based mining and adjacent-face placement.
 - Eight block hotbar, including placeable light-emitting torches.
-- Sky and torch flood lighting, moving clouds, bloom, HDR tonemapping,
-  four-sample MSAA, and an exact 20-minute, 24,000-tick day/night cycle with a
-  visible pixel-art sun, stars, and eight persistent moon phases.
+- Minecraft-style four-depth lighting with separate 0-15 sky and block
+  channels, six-neighbor propagation, opaque-cell occlusion, light-aware player
+  colors, and targeted chunk refresh after world changes.
+- Moving clouds, bloom, HDR tonemapping, four-sample MSAA, and an exact
+  20-minute, 24,000-tick day/night cycle with a visible pixel-art sun, stars,
+  and eight persistent moon phases.
 - A runtime-built, guttered texture atlas with deterministic material variants,
-  nearest-neighbor sampling, face shading, and depth shading.
+  nearest-neighbor voxel lightmap sampling, directional face shading, and four
+  depth-specific exposure and haze levels.
 - Main menu, world selection, HUD, and pause/save controls. Button actions are
   triggered only by Bevy's `Interaction::Pressed` state.
 - Autosave after changed world data, save on pause, and save-aware window
@@ -173,16 +180,20 @@ capture the gameplay frame:
 ```powershell
 $env:SIDECRAFT_AUTOSTART = "1"
 $env:SIDECRAFT_AUTOCAPTURE = "1"
+$env:SIDECRAFT_TEST_SEED = "9"
 $env:SIDECRAFT_TEST_DAY_TICKS = "18000"
 $env:SIDECRAFT_SCREENSHOT = "sidecraft-e2e.png"
 cargo run
 ```
 
-`SIDECRAFT_TEST_DAY_TICKS` is honored only with autostart and accepts an
-absolute tick count, so captures can target noon (`6000`), sunset (`12900`),
-midnight (`18000`), or a later moon phase. Without these environment
-variables, startup follows the normal main-menu flow. The rendered smoke test
-still requires a real window and graphics adapter.
+`SIDECRAFT_TEST_SEED` and `SIDECRAFT_TEST_DAY_TICKS` are honored only with
+autostart and accept decimal `u64` values. The seed makes terrain and spawn
+repeatable. The requested clock remains frozen for the test session, so
+captures can target sunrise (`0`), noon (`6000`), sunset (`12000`), midnight
+(`18000`), or a later moon phase exactly. Invalid or missing overrides retain
+the normal random seed and advancing clock. Without autostart, startup follows
+the normal main-menu flow. The rendered smoke test still requires a real window
+and graphics adapter.
 
 ## Current scope
 

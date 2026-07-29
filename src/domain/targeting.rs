@@ -154,6 +154,33 @@ mod tests {
     }
 
     #[test]
+    fn oblique_rays_target_visible_foreground_faces() {
+        let mut grid = BlockGrid::new(WORLD_HEIGHT);
+        let mut blocks = vec![0; (CHUNK_WIDTH * WORLD_HEIGHT) as usize];
+        blocks[(3 * CHUNK_WIDTH + 3) as usize] = BlockState::STONE.code();
+        WorldMutator::new(&mut grid).integrate_chunk(BlockChunk::from_dense(0, blocks).unwrap());
+        let offset = Vec3::new(16.0, 9.0, 36.0);
+        let direction = -offset.normalize();
+        let cases = [
+            (Vec3::new(3.5, 3.5, 0.5), IVec2::new(3, 4)),
+            (Vec3::new(3.5, 4.0, 0.0), IVec2::new(3, 4)),
+            (Vec3::new(4.0, 3.5, 0.0), IVec2::new(4, 3)),
+        ];
+
+        for (hit, adjacent) in cases {
+            let target = target_from_ray(
+                hit + offset,
+                direction,
+                Vec2::new(3.5, 2.0),
+                &grid.view(),
+                0,
+            );
+            assert_eq!(target.block, Some(IVec2::new(3, 3)));
+            assert_eq!(target.adjacent, Some(adjacent));
+        }
+    }
+
+    #[test]
     fn player_overlap_uses_aligned_extents() {
         assert!(tile_overlaps_player(IVec2::new(3, 3), Vec2::new(3.5, 3.5)));
         assert!(!tile_overlaps_player(IVec2::new(5, 3), Vec2::new(3.5, 3.5)));

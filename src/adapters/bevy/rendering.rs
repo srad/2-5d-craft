@@ -1,15 +1,21 @@
-use crate::adapters::bevy::world::WorldEntity;
+use crate::adapters::bevy::{DayCycleResource, RuntimeSet, world::WorldEntity};
 use crate::domain::{
-    BlockState, CHUNK_WIDTH, ChunkLayer, DEPTH_SLICES, DayCycle, LightGrid, VoxelPos, WORLD_HEIGHT,
-    WorldView, generated_voxel, stable_hash, surface_height_at_depth, world_to_chunk,
+    BlockState, CHUNK_WIDTH, ChunkLayer, DEPTH_SLICES, LightCell, LightVolume, VoxelPos,
+    WORLD_HEIGHT, WorldView, generated_voxel, stable_hash, world_to_chunk,
 };
 use avian2d::prelude::*;
 use bevy::asset::RenderAssetUsages;
+use bevy::image::ImageSampler;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
-use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::reflect::TypePath;
+use bevy::render::render_resource::{AsBindGroup, Extent3d, TextureDimension, TextureFormat};
+use bevy::shader::{Shader, ShaderRef};
 
 const TEXTURE_SIZE: u32 = 32;
+const LIGHTMAP_SIZE: u32 = 16;
+const VOXEL_SHADER_HANDLE: Handle<Shader> =
+    bevy::asset::uuid_handle!("a42fc7d0-7442-45b1-a797-bbefec330f96");
 const ATLAS_VARIANTS: u32 = 3;
 const FACE_VARIANTS: u32 = 3;
 const GUTTER: u32 = 2;
@@ -18,13 +24,50 @@ const ATLAS_TILES: u32 = BlockState::ALL.len() as u32 * ATLAS_VARIANTS * FACE_VA
 
 #[derive(Resource)]
 pub struct RenderCatalog {
-    pub opaque_material: Handle<StandardMaterial>,
-    pub cutout_material: Handle<StandardMaterial>,
+    pub opaque_material: Handle<VoxelMaterial>,
+    pub cutout_material: Handle<VoxelMaterial>,
     pub emissive_material: Handle<StandardMaterial>,
     selection_mesh: Handle<Mesh>,
     selection_material: Handle<StandardMaterial>,
     pub player_cube: Handle<Mesh>,
     pub player_materials: Vec<Handle<StandardMaterial>>,
+    pub player_palette: [LinearRgba; 5],
+}
+
+#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+pub struct VoxelMaterial {
+    #[texture(0)]
+    #[sampler(1)]
+    atlas: Handle<Image>,
+    #[texture(2)]
+    #[sampler(3)]
+    lightmap: Handle<Image>,
+    #[uniform(4)]
+    haze_color: LinearRgba,
+    alpha_mode: AlphaMode,
+}
+
+impl Material for VoxelMaterial {
+    fn fragment_shader() -> ShaderRef {
+        VOXEL_SHADER_HANDLE.clone().into()
+    }
+
+    fn alpha_mode(&self) -> AlphaMode {
+        self.alpha_mode
+    }
+}
+
+#[derive(Resource)]
+pub(crate) struct VoxelLightmap {
+    colors: [LinearRgba; (LIGHTMAP_SIZE * LIGHTMAP_SIZE) as usize],
+    bytes: Vec<u8>,
+    image: Handle<Image>,
+}
+
+impl VoxelLightmap {
+    pub(crate) fn sample(&self, light: LightCell) -> LinearRgba {
+        self.colors[lightmap_index(light.block, light.sky)]
+    }
 }
 
 #[derive(Component)]
@@ -34,29 +77,44 @@ pub struct RenderingPlugin;
 
 impl Plugin for RenderingPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, build_catalog);
+        bevy::asset::load_internal_asset!(
+            app,
+            VOXEL_SHADER_HANDLE,
+            "../../../assets/shaders/voxel_material.wgsl",
+            Shader::from_wgsl
+        );
+        app.add_plugins(MaterialPlugin::<VoxelMaterial>::default())
+            .add_systems(Startup, build_catalog)
+            .add_systems(Update, update_voxel_lightmap.in_set(RuntimeSet::Derived));
     }
 }
 
 fn build_catalog(
     mut commands: Commands,
+    day: Res<DayCycleResource>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut voxel_materials: ResMut<Assets<VoxelMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    let atlas = images.add(atlas_image());
-    let opaque_material = materials.add(StandardMaterial {
-        base_color_texture: Some(atlas.clone()),
-        perceptual_roughness: 0.94,
-        reflectance: 0.15,
-        ..default()
+    let mut atlas_image = atlas_image();
+    atlas_image.sampler = ImageSampler::nearest();
+    let atlas = images.add(atlas_image);
+    let lightmap_colors = generate_lightmap(day.daylight());
+    let lightmap_bytes = encode_lightmap(&lightmap_colors);
+    let lightmap_image = images.add(lightmap_image(lightmap_bytes.clone()));
+    let haze_color = haze_color(day.daylight());
+    let opaque_material = voxel_materials.add(VoxelMaterial {
+        atlas: atlas.clone(),
+        lightmap: lightmap_image.clone(),
+        haze_color,
+        alpha_mode: AlphaMode::Opaque,
     });
-    let cutout_material = materials.add(StandardMaterial {
-        base_color_texture: Some(atlas.clone()),
+    let cutout_material = voxel_materials.add(VoxelMaterial {
+        atlas: atlas.clone(),
+        lightmap: lightmap_image.clone(),
+        haze_color,
         alpha_mode: AlphaMode::Mask(0.38),
-        perceptual_roughness: 0.98,
-        reflectance: 0.08,
-        ..default()
     });
     let emissive_material = materials.add(StandardMaterial {
         base_color_texture: Some(atlas),
@@ -67,23 +125,24 @@ fn build_catalog(
         ..default()
     });
     let player_cube = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
-    let player_materials = [
+    let player_colors = [
         Color::srgb(0.78, 0.52, 0.32),
         Color::srgb(0.08, 0.38, 0.46),
         Color::srgb(0.12, 0.16, 0.25),
         Color::srgb(0.18, 0.09, 0.045),
         Color::srgb(0.10, 0.08, 0.06),
-    ]
-    .into_iter()
-    .map(|base_color| {
-        materials.add(StandardMaterial {
-            base_color,
-            perceptual_roughness: 0.9,
-            reflectance: 0.12,
-            ..default()
+    ];
+    let player_palette = player_colors.map(|color| color.to_linear());
+    let player_materials = player_colors
+        .into_iter()
+        .map(|base_color| {
+            materials.add(StandardMaterial {
+                base_color,
+                unlit: true,
+                ..default()
+            })
         })
-    })
-    .collect();
+        .collect();
     let selection_mesh = meshes.add(Cuboid::new(1.04, 1.04, 1.04));
     let selection_material = materials.add(StandardMaterial {
         base_color: Color::srgba(1.0, 0.92, 0.42, 0.18),
@@ -102,7 +161,41 @@ fn build_catalog(
         selection_material,
         player_cube,
         player_materials,
+        player_palette,
     });
+    commands.insert_resource(VoxelLightmap {
+        colors: lightmap_colors,
+        bytes: lightmap_bytes,
+        image: lightmap_image,
+    });
+}
+
+pub(crate) fn update_voxel_lightmap(
+    day: Res<DayCycleResource>,
+    catalog: Option<Res<RenderCatalog>>,
+    mut lightmap: Option<ResMut<VoxelLightmap>>,
+    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<VoxelMaterial>>,
+) {
+    let (Some(catalog), Some(lightmap)) = (catalog, lightmap.as_mut()) else {
+        return;
+    };
+    let colors = generate_lightmap(day.daylight());
+    let bytes = encode_lightmap(&colors);
+    if bytes == lightmap.bytes {
+        return;
+    }
+    if let Some(mut image) = images.get_mut(&lightmap.image) {
+        *image = lightmap_image(bytes.clone());
+    }
+    let haze_color = haze_color(day.daylight());
+    for handle in [&catalog.opaque_material, &catalog.cutout_material] {
+        if let Some(mut material) = materials.get_mut(handle) {
+            material.haze_color = haze_color;
+        }
+    }
+    lightmap.colors = colors;
+    lightmap.bytes = bytes;
 }
 
 pub fn spawn_selection_outline(commands: &mut Commands, catalog: &RenderCatalog) {
@@ -168,15 +261,16 @@ impl Face {
 
     const fn shade(self) -> f32 {
         match self {
-            Self::Top => 1.08,
-            Self::Front => 0.96,
-            Self::Right => 0.82,
-            Self::Left => 0.68,
-            Self::Back => 0.62,
-            Self::Bottom => 0.55,
+            Self::Top => 1.0,
+            Self::Bottom => 0.5,
+            Self::Front | Self::Back => 0.8,
+            Self::Right | Self::Left => 0.6,
         }
     }
 }
+
+const NIGHT_HAZE: [f32; 3] = [0.08, 0.11, 0.20];
+const DAY_HAZE: [f32; 3] = [0.34, 0.46, 0.60];
 
 pub struct ChunkMeshes {
     pub opaque: Mesh,
@@ -188,8 +282,7 @@ pub fn build_chunk_meshes(
     view: &WorldView<'_>,
     global_chunk_x: i64,
     seed: u64,
-    light: &LightGrid,
-    day: &DayCycle,
+    light: &LightVolume,
 ) -> ChunkMeshes {
     let mut opaque = VoxelMeshBuilder::default();
     let mut cutout = VoxelMeshBuilder::default();
@@ -236,16 +329,13 @@ pub fn build_chunk_meshes(
                     {
                         continue;
                     }
-                    let color = face_color(
-                        view,
-                        light,
-                        day,
-                        global_x,
-                        VoxelPos::foreground(global_x, y),
-                        depth,
-                        face,
-                        seed,
-                    );
+                    let sampled = face_light(light, global_x, y, depth, face, &voxel_at);
+                    let color = [
+                        f32::from(sampled.sky) / 15.0,
+                        f32::from(sampled.block) / 15.0,
+                        face.shade(),
+                        f32::from(depth) / f32::from(DEPTH_SLICES - 1),
+                    ];
                     builder.push_voxel_face(
                         local_x as f32,
                         y as f32,
@@ -267,44 +357,55 @@ pub fn build_chunk_meshes(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn face_color(
-    view: &WorldView<'_>,
-    light: &LightGrid,
-    day: &DayCycle,
+fn face_light(
+    light: &LightVolume,
     global_x: i64,
-    position: VoxelPos,
+    y: i32,
     depth: u8,
     face: Face,
-    seed: u64,
-) -> [f32; 4] {
-    let daylight = f32::from(day.sky_light_level()) / 15.0;
-    let (level, torch) = if depth == 0 {
-        let visible = light.visible_at(view, position);
-        (
-            f32::from(
-                visible
-                    .sky
-                    .saturating_mul(day.sky_light_level())
-                    .saturating_div(15)
-                    .max(visible.torch),
-            ) / 15.0,
-            f32::from(visible.torch) / 15.0,
-        )
-    } else {
-        let surface = surface_height_at_depth(seed, global_x, depth);
-        let exposure = if position.y >= surface - 4 { 1.0 } else { 0.42 };
-        (daylight * exposure, 0.0)
-    };
-    let depth_factor = 1.0 - f32::from(depth) * 0.075;
-    let brightness = (0.28 + level * 0.72) * face.shade() * depth_factor;
-    let warmth = torch * 0.16;
-    [
-        (brightness + warmth).min(1.15),
-        (brightness + warmth * 0.55).min(1.08),
-        (brightness + f32::from(depth) * 0.015).min(1.0),
-        1.0,
-    ]
+    voxel_at: &impl Fn(i64, i32, i32) -> Option<BlockState>,
+) -> LightCell {
+    let (dx, dy, dd) = face.neighbor();
+    let neighbor_depth = i32::from(depth) + dd;
+    if !(0..i32::from(DEPTH_SLICES)).contains(&neighbor_depth) {
+        return boundary_face_light(light, global_x, y, depth, voxel_at);
+    }
+    if y + dy >= WORLD_HEIGHT {
+        return LightCell { sky: 15, block: 0 };
+    }
+    light.get(global_x + i64::from(dx), y + dy, neighbor_depth as u8)
+}
+
+fn boundary_face_light(
+    light: &LightVolume,
+    global_x: i64,
+    y: i32,
+    depth: u8,
+    voxel_at: &impl Fn(i64, i32, i32) -> Option<BlockState>,
+) -> LightCell {
+    let mut visible = LightCell::default();
+    for (dx, dy, dd) in [
+        (1, 0, 0),
+        (-1, 0, 0),
+        (0, 1, 0),
+        (0, -1, 0),
+        (0, 0, 1),
+        (0, 0, -1),
+    ] {
+        let x = global_x + i64::from(dx);
+        let y = y + dy;
+        let depth = i32::from(depth) + dd;
+        if !(0..WORLD_HEIGHT).contains(&y)
+            || !(0..i32::from(DEPTH_SLICES)).contains(&depth)
+            || voxel_at(x, y, depth).is_some_and(|state| state.def().light_opacity >= 15)
+        {
+            continue;
+        }
+        let neighbor = light.get(x, y, depth as u8);
+        visible.sky = visible.sky.max(neighbor.sky);
+        visible.block = visible.block.max(neighbor.block);
+    }
+    visible
 }
 
 pub fn build_chunk_collider(view: &WorldView<'_>, chunk_x: i64) -> Option<Collider> {
@@ -469,6 +570,87 @@ fn tile_uvs(tile: u32) -> [[f32; 2]; 4] {
     let v0 = GUTTER as f32 / ATLAS_CELL as f32;
     let v1 = (GUTTER + TEXTURE_SIZE) as f32 / ATLAS_CELL as f32;
     [[u0, v1], [u1, v1], [u1, v0], [u0, v0]]
+}
+
+fn lightmap_index(block: u8, sky: u8) -> usize {
+    usize::from(sky.min(15)) * LIGHTMAP_SIZE as usize + usize::from(block.min(15))
+}
+
+fn classic_brightness(level: f32) -> f32 {
+    let normalized = (level / 15.0).clamp(0.0, 1.0);
+    0.05 + 0.95 * normalized / (4.0 - 3.0 * normalized)
+}
+
+fn generate_lightmap(daylight: f32) -> [LinearRgba; (LIGHTMAP_SIZE * LIGHTMAP_SIZE) as usize] {
+    let daylight = daylight.clamp(0.0, 1.0);
+    let global_sky_level = 4.0 + daylight * 11.0;
+    let sky_tint = [
+        mix(0.46, 1.0, daylight),
+        mix(0.56, 0.98, daylight),
+        mix(0.84, 0.92, daylight),
+    ];
+    let block_tint = [1.0, 0.58, 0.22];
+    std::array::from_fn(|index| {
+        let block = (index % LIGHTMAP_SIZE as usize) as u8;
+        let sky = (index / LIGHTMAP_SIZE as usize) as u8;
+        let effective_sky = (f32::from(sky) - (15.0 - global_sky_level)).max(0.0);
+        let sky_brightness = classic_brightness(effective_sky);
+        let block_brightness = if block == 0 {
+            0.0
+        } else {
+            classic_brightness(f32::from(block))
+        };
+        LinearRgba::rgb(
+            (sky_brightness * sky_tint[0]).max(block_brightness * block_tint[0]),
+            (sky_brightness * sky_tint[1]).max(block_brightness * block_tint[1]),
+            (sky_brightness * sky_tint[2]).max(block_brightness * block_tint[2]),
+        )
+    })
+}
+
+fn encode_lightmap(colors: &[LinearRgba; (LIGHTMAP_SIZE * LIGHTMAP_SIZE) as usize]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(colors.len() * 4);
+    for color in colors {
+        bytes.extend_from_slice(&[
+            linear_channel_byte(color.red),
+            linear_channel_byte(color.green),
+            linear_channel_byte(color.blue),
+            255,
+        ]);
+    }
+    bytes
+}
+
+fn linear_channel_byte(channel: f32) -> u8 {
+    (channel.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+fn lightmap_image(bytes: Vec<u8>) -> Image {
+    let mut image = Image::new(
+        Extent3d {
+            width: LIGHTMAP_SIZE,
+            height: LIGHTMAP_SIZE,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        bytes,
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    );
+    image.sampler = ImageSampler::nearest();
+    image
+}
+
+fn haze_color(daylight: f32) -> LinearRgba {
+    LinearRgba::rgb(
+        mix(NIGHT_HAZE[0], DAY_HAZE[0], daylight),
+        mix(NIGHT_HAZE[1], DAY_HAZE[1], daylight),
+        mix(NIGHT_HAZE[2], DAY_HAZE[2], daylight),
+    )
+}
+
+fn mix(start: f32, end: f32, amount: f32) -> f32 {
+    start + (end - start) * amount.clamp(0.0, 1.0)
 }
 
 fn atlas_image() -> Image {
@@ -639,6 +821,29 @@ mod tests {
     }
 
     #[test]
+    fn face_shades_follow_minecraft_directional_values() {
+        assert_eq!(Face::Top.shade(), 1.0);
+        assert_eq!(Face::Bottom.shade(), 0.5);
+        assert_eq!(Face::Front.shade(), 0.8);
+        assert_eq!(Face::Back.shade(), 0.8);
+        assert_eq!(Face::Right.shade(), 0.6);
+        assert_eq!(Face::Left.shade(), 0.6);
+    }
+
+    #[test]
+    fn lightmap_keeps_sky_and_block_channels_distinct() {
+        let noon = generate_lightmap(1.0);
+        let midnight = generate_lightmap(0.0);
+        let full_sky = noon[lightmap_index(0, 15)];
+        let night_sky = midnight[lightmap_index(0, 15)];
+        let torch = midnight[lightmap_index(12, 0)];
+        assert!(full_sky.red > night_sky.red);
+        assert!(torch.red > torch.green);
+        assert!(torch.green > torch.blue);
+        assert_eq!(encode_lightmap(&noon).len(), 16 * 16 * 4);
+    }
+
+    #[test]
     fn chunk_mesh_contains_real_depth_and_keeps_collider_two_dimensional() {
         let mut grid = empty_grid();
         let writes = [
@@ -664,8 +869,15 @@ mod tests {
             })
             .collect();
         WorldMutator::new(&mut grid).commit_batch(proposals);
-        let light = LightGrid::calculate(&grid.view());
-        let built = build_chunk_meshes(&grid.view(), 0, 7, &light, &DayCycle::default());
+        let view = grid.view();
+        let light = LightVolume::calculate(-15, 47, WORLD_HEIGHT, DEPTH_SLICES, |x, y, depth| {
+            if depth == 0 && view.contains_chunk(ChunkLayer::foreground(world_to_chunk(x))) {
+                view.block(VoxelPos::foreground(x, y))
+            } else {
+                generated_voxel(7, x, y, depth)
+            }
+        });
+        let built = build_chunk_meshes(&view, 0, 7, &light);
         let positions = built
             .opaque
             .attribute(Mesh::ATTRIBUTE_POSITION)

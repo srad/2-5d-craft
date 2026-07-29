@@ -9,7 +9,9 @@ use bevy::ui::IsDefaultUiCamera;
 
 const CAMERA_SCALE: f32 = 1.0 / 32.0;
 const CAMERA_DECAY: f32 = 8.0;
-const CAMERA_OFFSET: Vec3 = Vec3::new(8.0, 6.0, 40.0);
+const CAMERA_DISTANCE: f32 = 40.0;
+const CAMERA_YAW: f32 = 10.0 * std::f32::consts::PI / 180.0;
+const CAMERA_PITCH: f32 = 14.0 * std::f32::consts::PI / 180.0;
 
 #[derive(Component)]
 pub struct GameCamera;
@@ -94,17 +96,11 @@ fn setup_scene(mut commands: Commands) {
             scale: CAMERA_SCALE,
             ..OrthographicProjection::default_3d()
         }),
-        Transform::from_translation(Vec3::new(100.0, 40.0, 0.0) + CAMERA_OFFSET)
-            .looking_at(Vec3::new(100.0, 40.0, 0.0), Vec3::Y),
+        camera_transform(Vec3::new(100.0, 40.0, 0.0)),
         Hdr,
         Tonemapping::TonyMcMapface,
         Bloom::NATURAL,
         Msaa::Sample4,
-        AmbientLight {
-            color: Color::WHITE,
-            brightness: 120.0,
-            ..default()
-        },
         IsDefaultUiCamera,
         GameCamera,
     ));
@@ -131,23 +127,47 @@ fn follow_player(
     );
     rig.logical_position = clamp_camera_vertical(
         rig.logical_position,
-        projection.area.half_size().y,
+        projection.area.half_size().y / projected_world_y_scale(),
         WORLD_HEIGHT as f32,
     );
-    let target = Vec3::new(
-        snap(rig.logical_position.x, projection.scale),
-        snap(rig.logical_position.y, projection.scale),
-        0.0,
-    );
-    camera.0.translation = target + CAMERA_OFFSET;
-    camera.0.look_at(target, Vec3::Y);
+    let target = snap_camera_target(rig.logical_position.extend(0.0), projection.scale);
+    *camera.0 = camera_transform(target);
 }
 
 pub(crate) fn center_camera(target: Vec2, camera: &mut Transform, rig: &mut CameraRig) {
     rig.logical_position = target;
-    let target = target.extend(0.0);
-    camera.translation = target + CAMERA_OFFSET;
-    camera.look_at(target, Vec3::Y);
+    *camera = camera_transform(snap_camera_target(target.extend(0.0), CAMERA_SCALE));
+}
+
+fn camera_offset() -> Vec3 {
+    let horizontal = CAMERA_DISTANCE * CAMERA_PITCH.cos();
+    Vec3::new(
+        horizontal * CAMERA_YAW.sin(),
+        CAMERA_DISTANCE * CAMERA_PITCH.sin(),
+        horizontal * CAMERA_YAW.cos(),
+    )
+}
+
+pub(crate) fn camera_rotation() -> Quat {
+    camera_transform(Vec3::ZERO).rotation
+}
+
+fn camera_transform(target: Vec3) -> Transform {
+    Transform::from_translation(target + camera_offset()).looking_at(target, Vec3::Y)
+}
+
+fn snap_camera_target(target: Vec3, pixel_size: f32) -> Vec3 {
+    let rotation = camera_rotation();
+    let right = rotation * Vec3::X;
+    let up = rotation * Vec3::Y;
+    let back = rotation * Vec3::Z;
+    right * snap(target.dot(right), pixel_size)
+        + up * snap(target.dot(up), pixel_size)
+        + back * target.dot(back)
+}
+
+fn projected_world_y_scale() -> f32 {
+    Vec3::Y.dot(camera_rotation() * Vec3::Y).abs()
 }
 
 fn toggle_pause(
@@ -216,15 +236,39 @@ mod tests {
     }
 
     #[test]
+    fn oblique_projection_exposes_depth_without_collapsing_the_foreground() {
+        let inverse = camera_rotation().inverse();
+        let foreground_x = inverse * Vec3::X;
+        let foreground_y = inverse * Vec3::Y;
+        let depth = inverse * Vec3::NEG_Z;
+        let slope = foreground_x.y.abs().atan2(foreground_x.x.abs());
+
+        assert!(foreground_x.x.abs() >= 0.90);
+        assert!(foreground_y.y.abs() >= 0.95);
+        assert!(depth.x.abs() >= 0.16);
+        assert!(depth.y.abs() >= 0.20);
+        assert!(slope <= 6.5_f32.to_radians());
+    }
+
+    #[test]
+    fn camera_target_snaps_in_view_space() {
+        let snapped = snap_camera_target(Vec3::new(1.017, 2.013, 0.0), CAMERA_SCALE);
+        let local = camera_rotation().inverse() * snapped;
+        assert!((local.x / CAMERA_SCALE - (local.x / CAMERA_SCALE).round()).abs() < 0.0001);
+        assert!((local.y / CAMERA_SCALE - (local.y / CAMERA_SCALE).round()).abs() < 0.0001);
+    }
+
+    #[test]
     fn centering_resets_camera_and_smoothing_origin() {
         let mut camera = Transform::from_xyz(100.0, 40.0, 100.0);
         let mut rig = CameraRig {
             logical_position: Vec2::new(100.0, 40.0),
         };
         center_camera(Vec2::new(-12.5, 34.0), &mut camera, &mut rig);
+        let expected_target = snap_camera_target(Vec3::new(-12.5, 34.0, 0.0), CAMERA_SCALE);
         assert_eq!(
             camera.translation,
-            Vec3::new(-12.5, 34.0, 0.0) + CAMERA_OFFSET
+            camera_transform(expected_target).translation
         );
         assert_eq!(rig.logical_position, Vec2::new(-12.5, 34.0));
     }

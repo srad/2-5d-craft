@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use crate::{
     AppState,
     adapters::bevy::{
-        WorldCatalogResource,
+        WorldCatalogResource, environment_flag,
         player::{Hotbar, Player},
         session::SessionCommand,
     },
@@ -158,11 +158,6 @@ fn autostart_world(mut messages: MessageWriter<SessionCommand>) {
     if environment_flag("SIDECRAFT_AUTOSTART") {
         messages.write(SessionCommand::NewWorld);
     }
-}
-
-fn environment_flag(name: &str) -> bool {
-    std::env::var(name)
-        .is_ok_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
 }
 
 fn spawn_world_select(

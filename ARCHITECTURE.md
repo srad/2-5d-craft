@@ -136,6 +136,26 @@ struct BlockState {
 - An absent chunk means unmodified generator output. A chunk becomes persistent
   when its blocks or pending simulation state differ from that output.
 
+## Presentation contract
+
+- Gameplay, collision, movement, targeting, and placement remain on depth 0.
+- A fixed orthographic camera looks at depth 0 with 10 degrees of horizontal
+  yaw and 14 degrees of downward pitch. Camera setup, following, recentering,
+  and floating-origin rebasing must share the same transform construction.
+- Camera targets are snapped in camera-view space so the oblique projection
+  remains stable at the nearest-neighbor pixel scale.
+- Render depths keep their real voxel positions. Per-depth exposure and haze
+  separate rear scenery without changing generation or making it interactive.
+- Lighting is a derived four-depth volume with independent 0-15 sky and block
+  channels. Opaque voxels stop propagation; open cells spread light through
+  their six orthogonal neighbors without leaking beyond the rendered depth
+  bounds.
+- Voxel materials are unlit and sample the discrete light volume through a
+  nearest-neighbor lightmap. Day/night changes update that lightmap rather
+  than rebuilding chunk meshes.
+- Sun and moon visuals stay camera-aligned and communicate the clock state.
+  They do not drive directional PBR lights or cast smooth real-time shadows.
+
 ## World mutation boundary
 
 `WorldMutator` is the only component allowed to change authoritative chunks.
