@@ -35,13 +35,16 @@ pub const LIGHTNESS_LIMITS: F32Limits = F32Limits {
 };
 pub const VARIANT_STRENGTH_LIMITS: (i16, i16) = (0, 16);
 pub const ORE_COVERAGE_LIMITS: F32Limits = F32Limits {
-    min: 0.30,
+    min: 0.20,
     max: 0.35,
 };
 pub const ORE_BRANCHES_LIMITS: UsizeLimits = UsizeLimits { min: 1, max: 10 };
 pub const ORE_THICKNESS_LIMITS: UsizeLimits = UsizeLimits { min: 1, max: 4 };
 pub const ORE_CENTER_BIAS_LIMITS: F32Limits = F32Limits { min: 0.0, max: 1.0 };
-pub const LEAF_HOLE_DENSITY_LIMITS: F32Limits = F32Limits { min: 0.0, max: 0.2 };
+pub const LEAF_HOLE_DENSITY_LIMITS: F32Limits = F32Limits {
+    min: 0.0,
+    max: 0.25,
+};
 pub const GRASS_FRINGE_DEPTH_LIMITS: UsizeLimits = UsizeLimits { min: 1, max: 7 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

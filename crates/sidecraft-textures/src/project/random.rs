@@ -48,11 +48,11 @@ pub fn randomized_options(seed: u64) -> GenerateOptions {
         lightness: rng.float(-0.04, 0.01),
         variant_strength: rng.range(2, 5) as i16,
         ore_pattern: ores[rng.index(ores.len())],
-        ore_coverage: rng.float(0.30, 0.35),
+        ore_coverage: rng.float(0.22, 0.28),
         ore_branches: rng.range(3, 6),
         ore_thickness: rng.range(2, 3),
         ore_center_bias: rng.float(0.75, 1.0),
-        leaf_hole_density: rng.float(0.02, 0.06),
+        leaf_hole_density: rng.float(0.18, 0.24),
         grass_fringe_depth: rng.range(3, 5),
         quality: QualityPreset::Balanced,
         ..Default::default()
@@ -158,6 +158,8 @@ mod tests {
         assert_eq!(first.material_overrides, second.material_overrides);
         assert_eq!(first.pattern, second.pattern);
         assert_eq!(first.cluster_size, second.cluster_size);
+        assert!((0.22..=0.28).contains(&first.ore_coverage));
+        assert!((0.18..=0.24).contains(&first.leaf_hole_density));
         crate::config::validate_options(&first).unwrap();
     }
 

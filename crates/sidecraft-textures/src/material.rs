@@ -1,6 +1,6 @@
 use crate::{
     BlockKind, Face, GenerateOptions, PackImage,
-    algorithm::{PIXELS, best_pattern, ore_mask},
+    algorithm::{PIXELS, best_pattern, leaf_hole_mask, ore_mask},
     palette::{adjusted_palette, base_palette, material_palette},
     rng::{FixedRng, mix_seed},
 };
@@ -63,10 +63,11 @@ fn grass_image(face: Face, variant: usize, options: &GenerateOptions) -> PackIma
         options.variant_strength,
     );
     let grass = adjusted_palette(base_palette(BlockKind::Grass, options.palette), options);
+    let grass_indices = best_pattern(&mut rng, options);
     for x in 0..16 {
         let depth = options.grass_fringe_depth.saturating_sub(rng.index(3)) as u32;
         for y in 0..depth {
-            let color = grass[((x as usize + y as usize + variant) % 3) + 1];
+            let color = grass[grass_indices[(y * 16 + x) as usize] as usize];
             image.set_pixel(x, y, [color[0], color[1], color[2], 255]);
         }
     }
@@ -81,7 +82,7 @@ fn ore_image(block: BlockKind, face: Face, variant: usize, options: &GenerateOpt
     let ore = material_palette(block, options);
     for (index, occupied) in mask.into_iter().enumerate() {
         if occupied {
-            let color = ore[1 + rng.index(3)];
+            let color = ore[ore_role(&mask, index)];
             base.pixels[index * 4..index * 4 + 4]
                 .copy_from_slice(&[color[0], color[1], color[2], 255]);
         }
@@ -128,24 +129,30 @@ fn leaves_image(face: Face, variant: usize, options: &GenerateOptions) -> PackIm
         &format!("leaf-holes-{}", face.slug()),
         variant as u64,
     ));
-    let holes = (options.leaf_hole_density * PIXELS as f32).round() as usize;
-    let mut placed = 0;
-    while placed < holes {
-        let x = rng.index(16) as u32;
-        let y = rng.index(16) as u32;
-        image.set_pixel(x, y, [0, 0, 0, 0]);
-        placed += 1;
-        if placed < holes && rng.chance(0.55) {
-            let (dx, dy) = crate::algorithm::CARDINALS[rng.index(4)];
-            image.set_pixel(
-                (x as i32 + dx).clamp(0, 15) as u32,
-                (y as i32 + dy).clamp(0, 15) as u32,
-                [0, 0, 0, 0],
-            );
-            placed += 1;
+    for (index, hole) in leaf_hole_mask(&mut rng, options.leaf_hole_density)
+        .into_iter()
+        .enumerate()
+    {
+        if hole {
+            image.set_pixel((index % 16) as u32, (index / 16) as u32, [0, 0, 0, 0]);
         }
     }
     image
+}
+
+fn ore_role(mask: &[bool; PIXELS], index: usize) -> usize {
+    let x = (index % 16) as i32;
+    let y = (index / 16) as i32;
+    let occupied = |x: i32, y: i32| mask[(y.rem_euclid(16) * 16 + x.rem_euclid(16)) as usize];
+    let light_edges = usize::from(!occupied(x - 1, y)) + usize::from(!occupied(x, y - 1));
+    let dark_edges = usize::from(!occupied(x + 1, y)) + usize::from(!occupied(x, y + 1));
+    if light_edges > dark_edges {
+        2
+    } else if dark_edges > light_edges {
+        3
+    } else {
+        1
+    }
 }
 
 fn torch_image(face: Face, variant: usize, options: &GenerateOptions) -> PackImage {
@@ -196,8 +203,8 @@ fn indices_to_image(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::algorithm::{CARDINALS, inside};
-    use std::collections::{HashSet, VecDeque};
+    use crate::algorithm::CARDINALS;
+    use std::collections::HashSet;
 
     #[test]
     fn variants_are_distinct() {
@@ -213,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn ores_are_large_connected_and_central() {
+    fn ores_use_clustered_multitone_masks_over_matching_stone() {
         let options = GenerateOptions {
             seed: 14,
             ..Default::default()
@@ -225,31 +232,34 @@ mod tests {
                 stone.pixels[index * 4..index * 4 + 3] != ore.pixels[index * 4..index * 4 + 3]
             })
             .collect::<HashSet<_>>();
-        assert!((76..=92).contains(&changed.len()));
-        let first = *changed.iter().next().unwrap();
-        let mut reached = HashSet::from([first]);
-        let mut queue = VecDeque::from([first]);
-        while let Some(index) = queue.pop_front() {
-            let x = index % 16;
-            let y = index / 16;
-            for (dx, dy) in CARDINALS {
-                let nx = x as i32 + dx;
-                let ny = y as i32 + dy;
-                if inside(nx, ny) {
-                    let next = ny as usize * 16 + nx as usize;
-                    if changed.contains(&next) && reached.insert(next) {
-                        queue.push_back(next);
+        assert!((56..=72).contains(&changed.len()));
+        let ore_colors = changed
+            .iter()
+            .map(|index| ore.pixels[index * 4..index * 4 + 3].to_vec())
+            .collect::<HashSet<_>>();
+        assert!(ore_colors.len() >= 3);
+
+        let mut remaining = changed.clone();
+        let mut components = Vec::new();
+        while let Some(&start) = remaining.iter().next() {
+            remaining.remove(&start);
+            let mut pending = vec![start];
+            let mut size = 0;
+            while let Some(index) = pending.pop() {
+                size += 1;
+                let x = (index % 16) as i32;
+                let y = (index / 16) as i32;
+                for (dx, dy) in CARDINALS {
+                    let next = ((y + dy).rem_euclid(16) * 16 + (x + dx).rem_euclid(16)) as usize;
+                    if remaining.remove(&next) {
+                        pending.push(next);
                     }
                 }
             }
+            components.push(size);
         }
-        assert_eq!(reached.len(), changed.len());
-        let centroid_x =
-            changed.iter().map(|index| index % 16).sum::<usize>() as f32 / changed.len() as f32;
-        let centroid_y =
-            changed.iter().map(|index| index / 16).sum::<usize>() as f32 / changed.len() as f32;
-        assert!((centroid_x - 7.5).abs() <= 1.0);
-        assert!((centroid_y - 7.5).abs() <= 1.0);
+        assert!((6..=12).contains(&components.len()), "{components:?}");
+        assert!(components.iter().all(|size| (2..=16).contains(size)));
     }
 
     #[test]
@@ -262,11 +272,14 @@ mod tests {
     #[test]
     fn leaves_and_torches_use_transparency_only_where_intended() {
         let options = GenerateOptions::default();
-        assert!(
-            generate_block(BlockKind::Leaves, Face::Side, 0, &options)
+        let leaves = generate_block(BlockKind::Leaves, Face::Side, 0, &options);
+        assert_eq!(
+            leaves
                 .pixels
                 .chunks_exact(4)
-                .any(|pixel| pixel[3] == 0)
+                .filter(|pixel| pixel[3] == 0)
+                .count(),
+            56
         );
         assert!(
             generate_block(BlockKind::Torch, Face::Side, 0, &options)

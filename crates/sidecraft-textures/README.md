@@ -40,11 +40,13 @@ sampled per generated pack. Precedence is safe randomized defaults, an
 optional recipe, global CLI controls, then repeatable material `--set`
 overrides.
 
-`evenly-varied` produces a Minecraft-inspired restrained field of isolated
-pixels and short orthogonal marks spread across the tile. It avoids dominant
-diagonals, stripes, high-frequency noise, and large connected clumps. The
-other pattern choices remain available for materials that benefit from more
-pronounced clusters, cellular areas, strata, or short walks.
+All surface algorithms produce a Minecraft-inspired full-field patchwork using
+the material's four-color ramp. They grow deliberate orthogonal clusters and
+reject dominant flat fields, checkerboards, long bands, obvious seams, and
+high-frequency noise. `evenly-varied` uses the smallest, most widely distributed
+motifs; the other choices favor stamps, cellular areas, broken strata, or short
+walks. Ores use separated multitone clusters over the stone field, while leaf
+cutouts preserve a connected canopy.
 
 Other commands:
 
@@ -145,11 +147,11 @@ saturation = 1.0
 lightness = -0.02
 variant-strength = 4
 ore-pattern = "center-growth"
-ore-coverage = 0.32
+ore-coverage = 0.25
 ore-branches = 4
 ore-thickness = 2
 ore-center-bias = 0.88
-leaf-hole-density = 0.04
+leaf-hole-density = 0.22
 grass-fringe-depth = 4
 quality = "balanced"
 

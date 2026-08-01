@@ -114,11 +114,11 @@ impl Default for GenerateOptions {
             lightness: -0.02,
             variant_strength: 4,
             ore_pattern: OrePattern::CenterGrowth,
-            ore_coverage: 0.32,
+            ore_coverage: 0.25,
             ore_branches: 4,
             ore_thickness: 2,
             ore_center_bias: 0.88,
-            leaf_hole_density: 0.04,
+            leaf_hole_density: 0.22,
             grass_fringe_depth: 4,
             quality: QualityPreset::Balanced,
             material_overrides: BTreeMap::new(),
@@ -222,7 +222,7 @@ pub fn validate_options(options: &GenerateOptions) -> Result<(), PackError> {
         ),
         (
             (ORE_COVERAGE_LIMITS.min..=ORE_COVERAGE_LIMITS.max).contains(&options.ore_coverage),
-            "ore-coverage must be in 0.30..=0.35",
+            "ore-coverage must be in 0.20..=0.35",
         ),
         (
             (ORE_BRANCHES_LIMITS.min..=ORE_BRANCHES_LIMITS.max).contains(&options.ore_branches),
@@ -240,7 +240,7 @@ pub fn validate_options(options: &GenerateOptions) -> Result<(), PackError> {
         (
             (LEAF_HOLE_DENSITY_LIMITS.min..=LEAF_HOLE_DENSITY_LIMITS.max)
                 .contains(&options.leaf_hole_density),
-            "leaf-hole-density must be in 0..=0.2",
+            "leaf-hole-density must be in 0..=0.25",
         ),
         (
             (GRASS_FRINGE_DEPTH_LIMITS.min..=GRASS_FRINGE_DEPTH_LIMITS.max)

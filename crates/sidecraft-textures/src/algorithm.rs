@@ -16,282 +16,401 @@ pub struct ArtifactMetrics {
 }
 
 pub(crate) fn best_pattern(rng: &mut FixedRng, options: &GenerateOptions) -> [u8; PIXELS] {
-    let threshold = match options.quality {
-        QualityPreset::Relaxed => 1.15,
-        QualityPreset::Balanced => 0.86,
-        QualityPreset::Strict => 0.68,
+    let attempts = match options.quality {
+        QualityPreset::Relaxed => 8,
+        QualityPreset::Balanced => 16,
+        QualityPreset::Strict => 32,
     };
     let mut best = [0_u8; PIXELS];
     let mut best_score = f32::INFINITY;
-    for _ in 0..32 {
+    for _ in 0..attempts {
         let mut candidate = generate_pattern(rng, options);
         for _ in 0..options.smoothing_passes {
             candidate = cellular_cleanup(candidate);
         }
-        let metrics = artifact_metrics(&candidate);
-        if metrics.score < best_score {
+        let score = patchwork_score(&candidate);
+        if score < best_score {
             best = candidate;
-            best_score = metrics.score;
-        }
-        if metrics.score <= threshold {
-            return candidate;
+            best_score = score;
         }
     }
     best
 }
 
 fn generate_pattern(rng: &mut FixedRng, options: &GenerateOptions) -> [u8; PIXELS] {
-    match options.pattern {
-        PatternAlgorithm::ClusterStamps => cluster_stamps(rng, options),
-        PatternAlgorithm::EvenlyVaried => evenly_varied(rng, options),
-        PatternAlgorithm::CellularClumps => cellular_clumps(rng, options),
-        PatternAlgorithm::BrokenStrata => broken_strata(rng, options),
-        PatternAlgorithm::ShortWalks => short_walks(rng, options),
-    }
-}
-
-fn evenly_varied(rng: &mut FixedRng, options: &GenerateOptions) -> [u8; PIXELS] {
-    let target = (options.cluster_density * PIXELS as f32)
-        .round()
-        .clamp(24.0, 64.0) as usize;
-    let maximum_mark = options.cluster_size.clamp(1, 3);
+    let targets = shade_targets(options.cluster_density);
+    let mut remaining = targets;
+    remaining[0] = 0;
     let mut output = [0_u8; PIXELS];
-    while nonzero_count(&output) < target {
-        let origin = best_spaced_point(rng, &output);
-        let remaining = target - nonzero_count(&output);
-        let length = if maximum_mark == 1 {
-            1
-        } else {
-            rng.range(1, maximum_mark).min(remaining)
-        };
-        let direction = CARDINALS[rng.index(CARDINALS.len())];
-        for step in 0..length {
-            let x = origin.0 + direction.0 * step as i32;
-            let y = origin.1 + direction.1 * step as i32;
-            if !inside(x, y) || get_index(&output, x, y) != 0 {
-                continue;
-            }
-            set_index(&mut output, x, y, if rng.chance(0.24) { 2 } else { 1 });
-        }
-        if get_index(&output, origin.0, origin.1) == 0 {
-            set_index(&mut output, origin.0, origin.1, 1);
-        }
-    }
-    output
-}
+    let mut origins = Vec::new();
+    let mut cluster_index = 0;
+    let mut attempts = 0;
 
-fn best_spaced_point(rng: &mut FixedRng, output: &[u8; PIXELS]) -> (i32, i32) {
-    let occupied = output
-        .iter()
-        .enumerate()
-        .filter(|(_, value)| **value != 0)
-        .map(|(index, _)| {
-            (
-                (index % SIDE as usize) as i32,
-                (index / SIDE as usize) as i32,
-            )
-        })
-        .collect::<Vec<_>>();
-    if occupied.is_empty() {
-        return (rng.index(16) as i32, rng.index(16) as i32);
-    }
-    let mut best = None;
-    for _ in 0..24 {
-        let candidate = (rng.index(16) as i32, rng.index(16) as i32);
-        if get_index(output, candidate.0, candidate.1) != 0 {
+    while remaining[1..].iter().sum::<usize>() > 0 && attempts < PIXELS * 8 {
+        attempts += 1;
+        let primary = choose_role(rng, &remaining, None);
+        let size = cluster_size(rng, options, remaining[primary]);
+        let origin = choose_origin(rng, &output, &origins, cluster_index, options.placement);
+        let cells = grow_surface_cluster(rng, &output, origin, size, options);
+        if cells.is_empty() {
             continue;
         }
-        let separation = occupied
-            .iter()
-            .map(|&(x, y)| (x - candidate.0).abs() + (y - candidate.1).abs())
-            .min()
-            .unwrap_or(0);
-        if best.is_none_or(|(_, best_separation)| separation > best_separation) {
-            best = Some((candidate, separation));
+        origins.push(origin);
+        cluster_index += 1;
+        for index in cells {
+            if output[index] != 0 || remaining[1..].iter().sum::<usize>() == 0 {
+                continue;
+            }
+            let use_support = rng.chance(0.28)
+                && remaining
+                    .iter()
+                    .enumerate()
+                    .any(|(role, count)| role != primary && role != 0 && *count > 0);
+            let role = if remaining[primary] > 0 && !use_support {
+                primary
+            } else {
+                choose_role(rng, &remaining, Some(primary))
+            };
+            output[index] = role as u8;
+            remaining[role] -= 1;
         }
     }
-    best.map_or_else(
-        || {
-            output
-                .iter()
-                .position(|value| *value == 0)
-                .map(|index| ((index % 16) as i32, (index / 16) as i32))
-                .expect("even variation stops before the tile is full")
-        },
-        |(point, _)| point,
-    )
+
+    fill_remaining_roles(rng, &mut output, &mut remaining);
+    output
 }
 
-fn seed_points(rng: &mut FixedRng, options: &GenerateOptions, count: usize) -> Vec<(i32, i32)> {
-    match options.placement {
-        PlacementAlgorithm::Uniform => (0..count)
-            .map(|_| (rng.index(16) as i32, rng.index(16) as i32))
-            .collect(),
+fn shade_targets(density: f32) -> [usize; 4] {
+    let base = ((0.62 - density).clamp(0.30, 0.58) * PIXELS as f32).round() as usize;
+    let varied = PIXELS - base;
+    let first = (varied as f32 * 0.46).round() as usize;
+    let second = (varied as f32 * 0.27).round() as usize;
+    [base, first, second, varied - first - second]
+}
+
+fn choose_role(rng: &mut FixedRng, remaining: &[usize; 4], avoid: Option<usize>) -> usize {
+    let total = (1..4)
+        .filter(|role| Some(*role) != avoid)
+        .map(|role| remaining[role])
+        .sum::<usize>();
+    if total == 0 {
+        return (1..4).find(|role| remaining[*role] > 0).unwrap_or(1);
+    }
+    let mut choice = rng.index(total);
+    for (role, count) in remaining.iter().enumerate().skip(1) {
+        if Some(role) == avoid {
+            continue;
+        }
+        if choice < *count {
+            return role;
+        }
+        choice -= *count;
+    }
+    3
+}
+
+fn cluster_size(rng: &mut FixedRng, options: &GenerateOptions, remaining: usize) -> usize {
+    let maximum = match options.pattern {
+        PatternAlgorithm::ClusterStamps => options.cluster_size.clamp(2, 8),
+        PatternAlgorithm::EvenlyVaried => options.cluster_size.clamp(1, 3),
+        PatternAlgorithm::CellularClumps => (options.cluster_size + 3).clamp(4, 12),
+        PatternAlgorithm::BrokenStrata => options.cluster_size.clamp(3, 8),
+        PatternAlgorithm::ShortWalks => options.cluster_size.clamp(2, 9),
+    }
+    .min(remaining.max(1));
+    let minimum = match options.pattern {
+        PatternAlgorithm::CellularClumps => maximum.min(4),
+        PatternAlgorithm::BrokenStrata => maximum.min(3),
+        _ => 1,
+    };
+    rng.range(minimum, maximum)
+}
+
+fn choose_origin(
+    rng: &mut FixedRng,
+    output: &[u8; PIXELS],
+    origins: &[(i32, i32)],
+    cluster_index: usize,
+    placement: PlacementAlgorithm,
+) -> (i32, i32) {
+    let preferred = match placement {
+        PlacementAlgorithm::Uniform => (rng.index(16) as i32, rng.index(16) as i32),
         PlacementAlgorithm::JitteredGrid => {
-            let columns = (count as f32).sqrt().ceil().max(1.0) as usize;
-            let step = (16 / columns.max(1)).max(2);
-            (0..count)
-                .map(|index| {
-                    let cell_x = index % columns;
-                    let cell_y = index / columns;
-                    (
-                        (cell_x * step + rng.index(step)).min(15) as i32,
-                        (cell_y * step + rng.index(step)).min(15) as i32,
-                    )
-                })
-                .collect()
+            let cell = cluster_index % 16;
+            (
+                ((cell % 4) * 4 + rng.index(4)) as i32,
+                ((cell / 4) * 4 + rng.index(4)) as i32,
+            )
         }
         PlacementAlgorithm::PoissonDisc => {
-            let mut points = Vec::with_capacity(count);
-            for _ in 0..count * 24 {
+            let mut best = (rng.index(16) as i32, rng.index(16) as i32);
+            let mut best_distance = -1;
+            for _ in 0..24 {
                 let candidate = (rng.index(16) as i32, rng.index(16) as i32);
-                if points.iter().all(|&(x, y)| {
-                    let dx = x - candidate.0;
-                    let dy = y - candidate.1;
-                    dx * dx + dy * dy >= 9
-                }) {
-                    points.push(candidate);
-                    if points.len() == count {
-                        break;
-                    }
+                if get_wrapped(output, candidate.0, candidate.1) != 0 {
+                    continue;
+                }
+                let distance = origins
+                    .iter()
+                    .map(|origin| toroidal_distance(*origin, candidate))
+                    .min()
+                    .unwrap_or(SIDE);
+                if distance > best_distance {
+                    best = candidate;
+                    best_distance = distance;
                 }
             }
-            while points.len() < count {
-                points.push((rng.index(16) as i32, rng.index(16) as i32));
-            }
-            points
+            best
         }
-    }
+    };
+    nearest_base(output, preferred)
 }
 
-fn cluster_stamps(rng: &mut FixedRng, options: &GenerateOptions) -> [u8; PIXELS] {
-    const POLYOMINOES: &[&[(i32, i32)]] = &[
-        &[(0, 0), (1, 0)],
-        &[(0, 0), (1, 0), (2, 0)],
-        &[(0, 0), (0, 1), (1, 1)],
-        &[(0, 0), (1, 0), (0, 1), (1, 1)],
-        &[(0, 0), (0, 1), (0, 2), (1, 2)],
-        &[(0, 0), (1, 0), (2, 0), (1, 1)],
-        &[(0, 0), (1, 0), (1, 1), (2, 1)],
-    ];
-    let target = (options.cluster_density * PIXELS as f32) as usize;
-    let count = (target / options.cluster_size.max(1)).max(4);
-    let points = seed_points(rng, options, count);
-    let mut output = [0_u8; PIXELS];
-    for (origin_x, origin_y) in points {
-        let shape = match options.cluster_shape {
-            ClusterShape::Rectangular => {
-                if rng.chance(0.5) {
-                    POLYOMINOES[0]
-                } else {
-                    POLYOMINOES[3]
-                }
-            }
-            ClusterShape::Polyomino | ClusterShape::Mixed => {
-                POLYOMINOES[rng.index(POLYOMINOES.len())]
-            }
+fn nearest_base(output: &[u8; PIXELS], preferred: (i32, i32)) -> (i32, i32) {
+    (0..PIXELS)
+        .filter(|index| output[*index] == 0)
+        .map(coordinates)
+        .min_by_key(|point| toroidal_distance(*point, preferred))
+        .unwrap_or(preferred)
+}
+
+fn grow_surface_cluster(
+    rng: &mut FixedRng,
+    output: &[u8; PIXELS],
+    origin: (i32, i32),
+    size: usize,
+    options: &GenerateOptions,
+) -> Vec<usize> {
+    let rectangular = matches!(options.cluster_shape, ClusterShape::Rectangular)
+        || matches!(options.cluster_shape, ClusterShape::Mixed) && rng.chance(0.32);
+    if rectangular {
+        return rectangular_cluster(rng, output, origin, size);
+    }
+
+    let mut cells = Vec::with_capacity(size);
+    let origin_index = wrapped_index(origin.0, origin.1);
+    if output[origin_index] == 0 {
+        cells.push(origin_index);
+    }
+    let mut attempts = 0;
+    while cells.len() < size && attempts < size * 48 {
+        attempts += 1;
+        let source = match options.pattern {
+            PatternAlgorithm::ShortWalks => *cells.last().unwrap_or(&origin_index),
+            PatternAlgorithm::CellularClumps => cells[rng.index(cells.len())],
+            _ => cells[rng.index(cells.len())],
         };
-        let transpose = rng.chance(0.5);
-        for &(shape_x, shape_y) in shape {
-            let (shape_x, shape_y) = if transpose {
-                (shape_y, shape_x)
+        let (x, y) = coordinates(source);
+        let direction = surface_direction(rng, options.pattern);
+        let next = wrapped_index(x + direction.0, y + direction.1);
+        if output[next] == 0 && !cells.contains(&next) {
+            cells.push(next);
+        }
+    }
+    cells
+}
+
+fn rectangular_cluster(
+    rng: &mut FixedRng,
+    output: &[u8; PIXELS],
+    origin: (i32, i32),
+    size: usize,
+) -> Vec<usize> {
+    let width = (size as f32).sqrt().ceil() as usize;
+    let height = size.div_ceil(width);
+    let transpose = rng.chance(0.5);
+    let mut cells = Vec::with_capacity(size);
+    for row in 0..height {
+        for column in 0..width {
+            let (dx, dy) = if transpose {
+                (row as i32, column as i32)
             } else {
-                (shape_x, shape_y)
+                (column as i32, row as i32)
             };
-            set_index(
-                &mut output,
-                origin_x + shape_x,
-                origin_y + shape_y,
-                if rng.chance(0.22) { 2 } else { 1 },
-            );
-        }
-    }
-    output
-}
-
-fn cellular_clumps(rng: &mut FixedRng, options: &GenerateOptions) -> [u8; PIXELS] {
-    let mut output = [0_u8; PIXELS];
-    let seeds = ((options.cluster_density * 48.0) as usize).clamp(4, 14);
-    let target = (options.cluster_density * PIXELS as f32) as usize;
-    let mut frontier = Vec::new();
-    for point in seed_points(rng, options, seeds) {
-        set_index(&mut output, point.0, point.1, 1);
-        frontier.push(point);
-    }
-    while nonzero_count(&output) < target && !frontier.is_empty() {
-        let origin = frontier[rng.index(frontier.len())];
-        let (dx, dy) = CARDINALS[rng.index(CARDINALS.len())];
-        let next = (origin.0 + dx, origin.1 + dy);
-        if inside(next.0, next.1) {
-            set_index(
-                &mut output,
-                next.0,
-                next.1,
-                if rng.chance(0.16) { 2 } else { 1 },
-            );
-            frontier.push(next);
-        }
-        if frontier.len() > target * 3 {
-            let index = rng.index(frontier.len());
-            frontier.remove(index);
-        }
-    }
-    output
-}
-
-fn broken_strata(rng: &mut FixedRng, options: &GenerateOptions) -> [u8; PIXELS] {
-    let mut output = [0_u8; PIXELS];
-    let bands = ((options.cluster_density * 34.0) as usize).clamp(4, 11);
-    for _ in 0..bands {
-        let horizontal = rng.chance(0.56);
-        let (mut x, mut y) = (rng.index(16) as i32, rng.index(16) as i32);
-        for _ in 0..rng.range(2, options.cluster_size.clamp(3, 8)) {
-            if rng.chance(0.82) {
-                set_index(&mut output, x, y, if rng.chance(0.2) { 2 } else { 1 });
-            }
-            if horizontal {
-                x += 1;
-            } else {
-                y += 1;
+            let index = wrapped_index(origin.0 + dx, origin.1 + dy);
+            if output[index] == 0 && !cells.contains(&index) {
+                cells.push(index);
+                if cells.len() == size {
+                    return cells;
+                }
             }
         }
     }
-    output
+    cells
 }
 
-fn short_walks(rng: &mut FixedRng, options: &GenerateOptions) -> [u8; PIXELS] {
-    let target = (options.cluster_density * PIXELS as f32) as usize;
-    let mut output = [0_u8; PIXELS];
-    while nonzero_count(&output) < target {
-        let (mut x, mut y) = (rng.index(16) as i32, rng.index(16) as i32);
-        let length = rng.range(2, options.cluster_size.clamp(3, 9));
-        for _ in 0..length {
-            set_index(&mut output, x, y, if rng.chance(0.18) { 2 } else { 1 });
-            let (dx, dy) = CARDINALS[rng.index(CARDINALS.len())];
-            x = (x + dx).clamp(0, 15);
-            y = (y + dy).clamp(0, 15);
-        }
+fn surface_direction(rng: &mut FixedRng, pattern: PatternAlgorithm) -> (i32, i32) {
+    let horizontal_chance = match pattern {
+        PatternAlgorithm::BrokenStrata => 0.78,
+        PatternAlgorithm::ShortWalks => 0.62,
+        _ => 0.5,
+    };
+    if rng.chance(horizontal_chance) {
+        if rng.chance(0.5) { (1, 0) } else { (-1, 0) }
+    } else if rng.chance(0.5) {
+        (0, 1)
+    } else {
+        (0, -1)
     }
-    output
+}
+
+fn fill_remaining_roles(rng: &mut FixedRng, output: &mut [u8; PIXELS], remaining: &mut [usize; 4]) {
+    while remaining[1..].iter().sum::<usize>() > 0 {
+        let role = choose_role(rng, remaining, None);
+        let mut best = None;
+        for _ in 0..32 {
+            let index = rng.index(PIXELS);
+            if output[index] != 0 {
+                continue;
+            }
+            let (x, y) = coordinates(index);
+            let same = CARDINALS
+                .iter()
+                .filter(|&&(dx, dy)| get_wrapped(output, x + dx, y + dy) == role as u8)
+                .count();
+            let varied = CARDINALS
+                .iter()
+                .filter(|&&(dx, dy)| get_wrapped(output, x + dx, y + dy) != 0)
+                .count();
+            let score = same * 3 + varied;
+            if best.is_none_or(|(_, best_score)| score > best_score) {
+                best = Some((index, score));
+            }
+        }
+        let index = best
+            .map(|(index, _)| index)
+            .or_else(|| output.iter().position(|value| *value == 0))
+            .expect("shade quotas leave base pixels available");
+        output[index] = role as u8;
+        remaining[role] -= 1;
+    }
 }
 
 fn cellular_cleanup(input: [u8; PIXELS]) -> [u8; PIXELS] {
     let mut output = input;
     for y in 0..SIDE {
         for x in 0..SIDE {
-            let neighbors = CARDINALS
+            let mut counts = [0_u8; 4];
+            for (dx, dy) in CARDINALS {
+                counts[get_wrapped(&input, x + dx, y + dy) as usize] += 1;
+            }
+            let (role, count) = counts
                 .iter()
-                .filter(|&&(dx, dy)| get_index(&input, x + dx, y + dy) != 0)
-                .count();
-            let index = (y * SIDE + x) as usize;
-            if input[index] == 0 && neighbors >= 3 {
-                output[index] = 1;
-            } else if input[index] != 0 && neighbors == 0 {
-                output[index] = 0;
+                .copied()
+                .enumerate()
+                .max_by_key(|(_, count)| *count)
+                .unwrap();
+            if count >= 3 {
+                output[wrapped_index(x, y)] = role as u8;
             }
         }
     }
     output
+}
+
+fn patchwork_score(indices: &[u8; PIXELS]) -> f32 {
+    let mut counts = [0_usize; 4];
+    for &role in indices {
+        counts[role as usize] += 1;
+    }
+    let dominant = *counts.iter().max().unwrap() as f32 / PIXELS as f32;
+    let sparse_penalty = counts
+        .iter()
+        .map(|count| (0.08 - *count as f32 / PIXELS as f32).max(0.0))
+        .sum::<f32>();
+
+    let mut checkerboards = 0;
+    let mut horizontal_transitions = 0_i32;
+    let mut vertical_transitions = 0_i32;
+    for y in 0..SIDE {
+        for x in 0..SIDE {
+            let value = get_wrapped(indices, x, y);
+            horizontal_transitions += i32::from(value != get_wrapped(indices, x + 1, y));
+            vertical_transitions += i32::from(value != get_wrapped(indices, x, y + 1));
+            let right = get_wrapped(indices, x + 1, y);
+            let down = get_wrapped(indices, x, y + 1);
+            let diagonal = get_wrapped(indices, x + 1, y + 1);
+            if value == diagonal && right == down && value != right {
+                checkerboards += 1;
+            }
+        }
+    }
+    let orientation = (horizontal_transitions - vertical_transitions).unsigned_abs() as f32
+        / (horizontal_transitions + vertical_transitions).max(1) as f32;
+    let periodicity = patchwork_periodicity(indices);
+    let long_runs = long_run_penalty(indices);
+    let seam = seam_penalty(indices);
+
+    (dominant - 0.50).max(0.0) * 5.0
+        + sparse_penalty * 5.0
+        + checkerboards as f32 / PIXELS as f32 * 1.8
+        + orientation * 0.7
+        + periodicity * 1.2
+        + long_runs * 0.8
+        + seam * 0.8
+}
+
+fn patchwork_periodicity(indices: &[u8; PIXELS]) -> f32 {
+    let mut best = 0.0_f32;
+    for shift in 1..=4 {
+        let matches = (0..SIDE)
+            .flat_map(|y| (0..SIDE).map(move |x| (x, y)))
+            .filter(|&(x, y)| get_wrapped(indices, x, y) == get_wrapped(indices, x + shift, y))
+            .count();
+        best = best.max(matches as f32 / PIXELS as f32);
+    }
+    ((best - 0.58) / 0.42).clamp(0.0, 1.0)
+}
+
+fn long_run_penalty(indices: &[u8; PIXELS]) -> f32 {
+    let mut excess = 0;
+    for fixed in 0..SIDE {
+        for vertical in [false, true] {
+            let mut run = 1;
+            for offset in 1..SIDE {
+                let previous = if vertical {
+                    get_wrapped(indices, fixed, offset - 1)
+                } else {
+                    get_wrapped(indices, offset - 1, fixed)
+                };
+                let current = if vertical {
+                    get_wrapped(indices, fixed, offset)
+                } else {
+                    get_wrapped(indices, offset, fixed)
+                };
+                if current == previous {
+                    run += 1;
+                } else {
+                    excess += (run - 6).max(0);
+                    run = 1;
+                }
+            }
+            excess += (run - 6).max(0);
+        }
+    }
+    excess as f32 / PIXELS as f32
+}
+
+fn seam_penalty(indices: &[u8; PIXELS]) -> f32 {
+    let horizontal_interior = (0..SIDE)
+        .flat_map(|y| (0..SIDE - 1).map(move |x| (x, y)))
+        .filter(|&(x, y)| get_wrapped(indices, x, y) != get_wrapped(indices, x + 1, y))
+        .count() as f32
+        / (SIDE * (SIDE - 1)) as f32;
+    let vertical_interior = (0..SIDE - 1)
+        .flat_map(|y| (0..SIDE).map(move |x| (x, y)))
+        .filter(|&(x, y)| get_wrapped(indices, x, y) != get_wrapped(indices, x, y + 1))
+        .count() as f32
+        / (SIDE * (SIDE - 1)) as f32;
+    let horizontal_seam = (0..SIDE)
+        .filter(|&y| get_wrapped(indices, 15, y) != get_wrapped(indices, 0, y))
+        .count() as f32
+        / SIDE as f32;
+    let vertical_seam = (0..SIDE)
+        .filter(|&x| get_wrapped(indices, x, 15) != get_wrapped(indices, x, 0))
+        .count() as f32
+        / SIDE as f32;
+    (horizontal_interior - horizontal_seam).abs() + (vertical_interior - vertical_seam).abs()
 }
 
 pub fn artifact_metrics(indices: &[u8; PIXELS]) -> ArtifactMetrics {
@@ -342,125 +461,284 @@ pub fn artifact_metrics(indices: &[u8; PIXELS]) -> ArtifactMetrics {
 
 pub(crate) fn ore_mask(rng: &mut FixedRng, options: &GenerateOptions) -> [bool; PIXELS] {
     let target = (options.ore_coverage * PIXELS as f32).round() as usize;
+    let component_count = (options.ore_branches + 4).clamp(6, 12).min(target / 2);
+    let sizes = distributed_sizes(rng, target, component_count, 2, 16);
     let mut mask = [false; PIXELS];
-    let start = (7 + rng.index(3) as i32, 7 + rng.index(3) as i32);
-    mask[(start.1 * SIDE + start.0) as usize] = true;
-    let mut frontier = vec![start];
-    let mut attempts = 0;
-    while mask.iter().filter(|&&value| value).count() < target && attempts < target * 64 {
-        attempts += 1;
-        let origin = match options.ore_pattern {
-            OrePattern::CenterGrowth | OrePattern::CompactCellular => {
-                frontier[rng.index(frontier.len())]
-            }
-            OrePattern::BranchingWalk => *frontier.last().expect("ore frontier"),
-        };
-        let mut choices = CARDINALS;
-        if rng.chance(options.ore_center_bias) {
-            choices.sort_by_key(|&(dx, dy)| {
-                let x = origin.0 + dx - 8;
-                let y = origin.1 + dy - 8;
-                x * x + y * y
-            });
-        }
-        let offset = if rng.chance(options.ore_center_bias) {
-            choices[rng.index(2)]
-        } else {
-            choices[rng.index(4)]
-        };
-        let next = (
-            (origin.0 + offset.0).clamp(2, 13),
-            (origin.1 + offset.1).clamp(2, 13),
-        );
-        let index = (next.1 * SIDE + next.0) as usize;
-        if !mask[index] {
-            mask[index] = true;
-            frontier.push(next);
-            if options.ore_thickness > 1 && rng.chance(0.55) {
-                let extra = CARDINALS[rng.index(4)];
-                let extra = (
-                    (next.0 + extra.0).clamp(2, 13),
-                    (next.1 + extra.1).clamp(2, 13),
-                );
-                mask[(extra.1 * SIDE + extra.0) as usize] = true;
-            }
-        } else if matches!(options.ore_pattern, OrePattern::BranchingWalk) && frontier.len() > 1 {
-            frontier.pop();
-        } else if frontier.len() > target * 2 {
-            let remove = rng.index(frontier.len());
-            frontier.remove(remove);
-        }
-        if matches!(options.ore_pattern, OrePattern::BranchingWalk)
-            && frontier.len() % (target / options.ore_branches.max(1)).max(2) == 0
-        {
-            frontier.truncate(frontier.len().saturating_sub(rng.range(0, 3)).max(1));
-        }
-    }
-    fill_connected_fallback(&mut mask, target);
-    recenter(mask)
-}
 
-fn fill_connected_fallback(mask: &mut [bool; PIXELS], target: usize) {
-    while mask.iter().filter(|&&value| value).count() < target {
-        let mut candidates = Vec::new();
-        for (index, occupied) in mask.iter().enumerate() {
-            if !occupied {
-                continue;
-            }
-            let x = (index % 16) as i32;
-            let y = (index / 16) as i32;
-            for (dx, dy) in CARDINALS {
-                let next_x = x + dx;
-                let next_y = y + dy;
-                if !(2..=13).contains(&next_x) || !(2..=13).contains(&next_y) {
-                    continue;
-                }
-                let next = (next_y * SIDE + next_x) as usize;
-                if !mask[next] {
-                    let center_distance = (next_x - 8).abs() + (next_y - 8).abs();
-                    candidates.push((center_distance, next));
-                }
-            }
-        }
-        candidates.sort_unstable();
-        let Some((_, next)) = candidates.first() else {
+    for size in sizes {
+        let Some(origin) = choose_mask_origin(rng, &mask, options.ore_center_bias) else {
             break;
         };
-        mask[*next] = true;
+        let component = grow_ore_component(rng, &mask, origin, size, options);
+        if component.len() < 2 {
+            continue;
+        }
+        for index in component {
+            mask[index] = true;
+        }
+    }
+    fill_mask_to_target(&mut mask, target);
+    mask
+}
+
+pub(crate) fn leaf_hole_mask(rng: &mut FixedRng, density: f32) -> [bool; PIXELS] {
+    let target = (density * PIXELS as f32).round() as usize;
+    if target == 0 {
+        return [false; PIXELS];
+    }
+    let component_count = (target / 3).clamp(1, 24).min(target);
+    let mut best = [false; PIXELS];
+    let mut best_score = usize::MAX;
+    for _ in 0..16 {
+        let sizes = distributed_sizes(rng, target, component_count, 1, 8);
+        let mut candidate = [false; PIXELS];
+        for size in sizes {
+            let Some(origin) = choose_mask_origin(rng, &candidate, 0.0) else {
+                break;
+            };
+            for index in grow_hole_component(rng, &candidate, origin, size) {
+                candidate[index] = true;
+            }
+        }
+        fill_mask_to_target(&mut candidate, target);
+        let holes = component_sizes(&candidate, true);
+        let opaque = component_sizes(&candidate, false);
+        let largest_opaque = opaque.into_iter().max().unwrap_or(0);
+        let disconnected = (PIXELS - target).saturating_sub(largest_opaque);
+        let oversized = holes
+            .iter()
+            .map(|size| size.saturating_sub(8))
+            .sum::<usize>();
+        let score = disconnected * 20 + oversized * 4 + holes.len().abs_diff(component_count);
+        if score < best_score {
+            best = candidate;
+            best_score = score;
+        }
+    }
+    best
+}
+
+fn distributed_sizes(
+    rng: &mut FixedRng,
+    target: usize,
+    count: usize,
+    minimum: usize,
+    maximum: usize,
+) -> Vec<usize> {
+    let mut sizes = vec![minimum; count];
+    let mut remaining = target.saturating_sub(minimum * count);
+    while remaining > 0 {
+        let available = sizes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, size)| (*size < maximum).then_some(index))
+            .collect::<Vec<_>>();
+        if available.is_empty() {
+            break;
+        }
+        sizes[available[rng.index(available.len())]] += 1;
+        remaining -= 1;
+    }
+    sizes
+}
+
+fn choose_mask_origin(
+    rng: &mut FixedRng,
+    mask: &[bool; PIXELS],
+    center_bias: f32,
+) -> Option<(i32, i32)> {
+    (0..PIXELS)
+        .filter(|index| mask_clear(mask, *index))
+        .map(|index| {
+            let point = coordinates(index);
+            let separation = mask
+                .iter()
+                .enumerate()
+                .filter(|(_, occupied)| **occupied)
+                .map(|(other, _)| toroidal_distance(point, coordinates(other)))
+                .min()
+                .unwrap_or(SIDE);
+            let center_distance = (point.0 - 7).abs() + (point.1 - 7).abs();
+            let score = separation * 32 - (center_distance as f32 * center_bias * 3.0) as i32
+                + rng.index(7) as i32;
+            (score, point)
+        })
+        .max_by_key(|(score, _)| *score)
+        .map(|(_, point)| point)
+}
+
+fn grow_ore_component(
+    rng: &mut FixedRng,
+    mask: &[bool; PIXELS],
+    origin: (i32, i32),
+    size: usize,
+    options: &GenerateOptions,
+) -> Vec<usize> {
+    let mut cells = vec![wrapped_index(origin.0, origin.1)];
+    let mut attempts = 0;
+    while cells.len() < size && attempts < size * 96 {
+        attempts += 1;
+        let source = match options.ore_pattern {
+            OrePattern::BranchingWalk => *cells.last().unwrap(),
+            OrePattern::CenterGrowth | OrePattern::CompactCellular => cells[rng.index(cells.len())],
+        };
+        let (x, y) = coordinates(source);
+        let horizontal = match options.ore_pattern {
+            OrePattern::BranchingWalk => 0.72,
+            OrePattern::CenterGrowth => 0.64,
+            OrePattern::CompactCellular => 0.55,
+        };
+        let direction = if rng.chance(horizontal) {
+            if rng.chance(0.5) { (1, 0) } else { (-1, 0) }
+        } else if rng.chance(0.5) {
+            (0, 1)
+        } else {
+            (0, -1)
+        };
+        let next = wrapped_index(x + direction.0, y + direction.1);
+        let (_, next_y) = coordinates(next);
+        if toroidal_axis_distance(origin.1, next_y) > options.ore_thickness as i32
+            || cells.contains(&next)
+            || !mask_clear(mask, next)
+        {
+            continue;
+        }
+        cells.push(next);
+    }
+    while cells.len() < size {
+        let mut candidates = (0..PIXELS)
+            .filter(|index| !cells.contains(index) && mask_clear(mask, *index))
+            .filter(|index| {
+                let (x, y) = coordinates(*index);
+                cells.iter().any(|cell| {
+                    let point = coordinates(*cell);
+                    toroidal_distance(point, (x, y)) == 1
+                })
+            })
+            .collect::<Vec<_>>();
+        let bounded = candidates
+            .iter()
+            .copied()
+            .filter(|index| {
+                toroidal_axis_distance(origin.1, coordinates(*index).1)
+                    <= options.ore_thickness as i32
+            })
+            .collect::<Vec<_>>();
+        if !bounded.is_empty() {
+            candidates = bounded;
+        }
+        let Some(next) = candidates.get(rng.index(candidates.len().max(1))).copied() else {
+            break;
+        };
+        cells.push(next);
+    }
+    cells
+}
+
+fn grow_hole_component(
+    rng: &mut FixedRng,
+    mask: &[bool; PIXELS],
+    origin: (i32, i32),
+    size: usize,
+) -> Vec<usize> {
+    let mut cells = vec![wrapped_index(origin.0, origin.1)];
+    let mut attempts = 0;
+    while cells.len() < size && attempts < size * 64 {
+        attempts += 1;
+        let source = cells[rng.index(cells.len())];
+        let (x, y) = coordinates(source);
+        let (dx, dy) = CARDINALS[rng.index(CARDINALS.len())];
+        let next = wrapped_index(x + dx, y + dy);
+        if !cells.contains(&next) && mask_clear(mask, next) {
+            cells.push(next);
+        }
+    }
+    cells
+}
+
+fn mask_clear(mask: &[bool; PIXELS], index: usize) -> bool {
+    if mask[index] {
+        return false;
+    }
+    let (x, y) = coordinates(index);
+    CARDINALS
+        .iter()
+        .all(|&(dx, dy)| !mask[wrapped_index(x + dx, y + dy)])
+}
+
+fn fill_mask_to_target(mask: &mut [bool; PIXELS], target: usize) {
+    while mask.iter().filter(|occupied| **occupied).count() < target {
+        let next = (0..PIXELS)
+            .filter(|index| !mask[*index])
+            .max_by_key(|index| {
+                let (x, y) = coordinates(*index);
+                CARDINALS
+                    .iter()
+                    .filter(|&&(dx, dy)| mask[wrapped_index(x + dx, y + dy)])
+                    .count()
+            });
+        let Some(next) = next else {
+            break;
+        };
+        mask[next] = true;
     }
 }
 
-fn recenter(mask: [bool; PIXELS]) -> [bool; PIXELS] {
-    let coordinates = mask
-        .iter()
-        .enumerate()
-        .filter(|(_, occupied)| **occupied)
-        .map(|(index, _)| ((index % 16) as i32, (index / 16) as i32))
-        .collect::<Vec<_>>();
-    let count = coordinates.len() as f32;
-    let centroid_x = coordinates.iter().map(|(x, _)| *x).sum::<i32>() as f32 / count;
-    let centroid_y = coordinates.iter().map(|(_, y)| *y).sum::<i32>() as f32 / count;
-    let minimum_x = coordinates.iter().map(|(x, _)| *x).min().unwrap_or(0);
-    let maximum_x = coordinates.iter().map(|(x, _)| *x).max().unwrap_or(15);
-    let minimum_y = coordinates.iter().map(|(_, y)| *y).min().unwrap_or(0);
-    let maximum_y = coordinates.iter().map(|(_, y)| *y).max().unwrap_or(15);
-    let shift_x = (7.5 - centroid_x)
-        .round()
-        .clamp(-minimum_x as f32, (15 - maximum_x) as f32) as i32;
-    let shift_y = (7.5 - centroid_y)
-        .round()
-        .clamp(-minimum_y as f32, (15 - maximum_y) as f32) as i32;
-    let mut centered = [false; PIXELS];
-    for (x, y) in coordinates {
-        centered[((y + shift_y) * SIDE + x + shift_x) as usize] = true;
+fn component_sizes(mask: &[bool; PIXELS], value: bool) -> Vec<usize> {
+    let mut seen = [false; PIXELS];
+    let mut sizes = Vec::new();
+    for start in 0..PIXELS {
+        if seen[start] || mask[start] != value {
+            continue;
+        }
+        seen[start] = true;
+        let mut pending = vec![start];
+        let mut size = 0;
+        while let Some(index) = pending.pop() {
+            size += 1;
+            let (x, y) = coordinates(index);
+            for (dx, dy) in CARDINALS {
+                let next = wrapped_index(x + dx, y + dy);
+                if !seen[next] && mask[next] == value {
+                    seen[next] = true;
+                    pending.push(next);
+                }
+            }
+        }
+        sizes.push(size);
     }
-    centered
+    sizes
+}
+
+fn toroidal_distance(first: (i32, i32), second: (i32, i32)) -> i32 {
+    toroidal_axis_distance(first.0, second.0) + toroidal_axis_distance(first.1, second.1)
+}
+
+fn toroidal_axis_distance(first: i32, second: i32) -> i32 {
+    let distance = (first - second).abs();
+    distance.min(SIDE - distance)
+}
+
+fn coordinates(index: usize) -> (i32, i32) {
+    (
+        (index % SIDE as usize) as i32,
+        (index / SIDE as usize) as i32,
+    )
+}
+
+fn wrapped_index(x: i32, y: i32) -> usize {
+    (y.rem_euclid(SIDE) * SIDE + x.rem_euclid(SIDE)) as usize
+}
+
+fn get_wrapped(output: &[u8; PIXELS], x: i32, y: i32) -> u8 {
+    output[wrapped_index(x, y)]
 }
 
 pub(crate) fn inside(x: i32, y: i32) -> bool {
     (0..SIDE).contains(&x) && (0..SIDE).contains(&y)
 }
 
+#[cfg(test)]
 fn set_index(output: &mut [u8; PIXELS], x: i32, y: i32, value: u8) {
     if inside(x, y) {
         output[(y * SIDE + x) as usize] = value;
@@ -482,10 +760,9 @@ fn nonzero_count(output: &[u8; PIXELS]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::PatternAlgorithm;
 
     #[test]
-    fn all_pattern_algorithms_terminate_and_are_deterministic() {
+    fn all_pattern_algorithms_are_deterministic_and_use_four_balanced_roles() {
         for pattern in [
             PatternAlgorithm::ClusterStamps,
             PatternAlgorithm::EvenlyVaried,
@@ -495,38 +772,43 @@ mod tests {
         ] {
             let options = GenerateOptions {
                 pattern,
+                smoothing_passes: 0,
                 ..Default::default()
             };
             let mut first = FixedRng::new(91);
             let mut second = FixedRng::new(91);
-            assert_eq!(
-                best_pattern(&mut first, &options),
-                best_pattern(&mut second, &options)
+            let first = best_pattern(&mut first, &options);
+            assert_eq!(first, best_pattern(&mut second, &options));
+            let counts = (0..4)
+                .map(|role| first.iter().filter(|value| **value == role).count())
+                .collect::<Vec<_>>();
+            assert!(
+                counts.iter().all(|count| *count >= 30),
+                "{pattern:?}: {counts:?}"
+            );
+            assert!(
+                *counts.iter().max().unwrap() <= 128,
+                "{pattern:?}: {counts:?}"
             );
         }
     }
 
     #[test]
-    fn evenly_varied_distributes_small_marks_across_the_tile() {
-        let options = GenerateOptions {
-            seed: 19,
-            pattern: PatternAlgorithm::EvenlyVaried,
-            cluster_size: 2,
-            cluster_density: 0.2,
-            smoothing_passes: 0,
-            ..Default::default()
+    fn cluster_density_changes_base_share_monotonically() {
+        let pattern = |density| {
+            let mut rng = FixedRng::new(19);
+            best_pattern(
+                &mut rng,
+                &GenerateOptions {
+                    cluster_density: density,
+                    smoothing_passes: 0,
+                    ..Default::default()
+                },
+            )
         };
-        let mut rng = FixedRng::new(options.seed);
-        let pattern = best_pattern(&mut rng, &options);
-        let quadrants =
-            [(0..8, 0..8), (8..16, 0..8), (0..8, 8..16), (8..16, 8..16)].map(|(xs, ys)| {
-                ys.flat_map(|y| xs.clone().map(move |x| (y * 16 + x) as usize))
-                    .filter(|index| pattern[*index] != 0)
-                    .count()
-            });
-        assert!(quadrants.into_iter().all(|count| count >= 8));
-        assert!((48..=54).contains(&nonzero_count(&pattern)));
-        assert!(artifact_metrics(&pattern).orientation_imbalance < 0.45);
+        let low = pattern(0.04).iter().filter(|value| **value == 0).count();
+        let high = pattern(0.48).iter().filter(|value| **value == 0).count();
+        assert!(low > high);
     }
 
     #[test]
@@ -545,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn every_ore_algorithm_has_bounded_connected_output() {
+    fn ore_algorithms_create_separate_bounded_clusters() {
         for ore_pattern in [
             OrePattern::CenterGrowth,
             OrePattern::BranchingWalk,
@@ -557,7 +839,55 @@ mod tests {
             };
             let mut rng = FixedRng::new(31);
             let mask = ore_mask(&mut rng, &options);
-            assert!(mask.iter().filter(|&&occupied| occupied).count() >= 76);
+            let sizes = component_sizes(&mask, true);
+            assert_eq!(mask.iter().filter(|value| **value).count(), 64);
+            assert!(
+                (6..=12).contains(&sizes.len()),
+                "{ore_pattern:?}: {sizes:?}"
+            );
+            assert!(
+                sizes.iter().all(|size| (2..=16).contains(size)),
+                "{ore_pattern:?}: {sizes:?}"
+            );
         }
+    }
+
+    #[test]
+    fn ore_clusters_remain_bounded_across_supported_profiles() {
+        for seed in 0..32 {
+            for ore_pattern in [
+                OrePattern::CenterGrowth,
+                OrePattern::BranchingWalk,
+                OrePattern::CompactCellular,
+            ] {
+                for (coverage, branches, thickness) in [(0.20, 1, 1), (0.25, 4, 2), (0.28, 8, 4)] {
+                    let options = GenerateOptions {
+                        ore_pattern,
+                        ore_coverage: coverage,
+                        ore_branches: branches,
+                        ore_thickness: thickness,
+                        ..Default::default()
+                    };
+                    let mut rng = FixedRng::new(seed);
+                    let mask = ore_mask(&mut rng, &options);
+                    let sizes = component_sizes(&mask, true);
+                    let target = (coverage * PIXELS as f32).round() as usize;
+                    assert_eq!(mask.iter().filter(|value| **value).count(), target);
+                    assert!(
+                        sizes.iter().all(|size| (2..=16).contains(size)),
+                        "seed {seed}, {ore_pattern:?}: {sizes:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn leaf_holes_hit_the_target_without_fragmenting_the_canopy() {
+        let mut rng = FixedRng::new(47);
+        let mask = leaf_hole_mask(&mut rng, 0.22);
+        assert_eq!(mask.iter().filter(|value| **value).count(), 56);
+        let largest_opaque = component_sizes(&mask, false).into_iter().max().unwrap();
+        assert!(largest_opaque as f32 / (PIXELS - 56) as f32 >= 0.90);
     }
 }

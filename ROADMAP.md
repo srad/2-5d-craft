@@ -371,8 +371,9 @@ engine form a coherent living-builder loop.
   scenery.
 - `[x]` Replace shared procedural masks with a separately publishable,
   deterministic texture generator supporting bounded cluster, placement, ore,
-  palette, quality, recipe, batch, per-material CLI controls, and an evenly
-  varied small-mark pattern for classic voxel block faces.
+  palette, quality, recipe, batch, and per-material CLI controls, plus
+  full-field four-shade surfaces, separated multitone ore clusters, connected
+  leaf cutouts, and five distinct classic voxel pattern profiles.
 - `[x]` Add schema-1 full and partial texture packs, strict PNG/path validation,
   a checked-in default pack, authoritative previews, global atomic selection,
   live staged menu switching, stable runtime asset handles, environment assets,
@@ -385,9 +386,10 @@ engine form a coherent living-builder loop.
   revision-safe generation, a Day/Night shaded 3D preview sharing the game
   showcase layout and framing, exact atomic project save/open, unsaved-change
   handling, and non-overwriting export through the publishable texture
-  package; all workspace gates, the release build, and a real-GPU launch pass,
-  but manual editor visual acceptance remains pending because the hidden
-  hardware surface could not be captured through the Windows compositor.
+  package; generator metrics and offscreen tile/tiling inspection pass, as do
+  all workspace gates, the release build, and a real-GPU launch pass, but
+  manual editor visual acceptance remains pending because the hidden hardware
+  surface could not be captured through the Windows compositor.
 - `[ ]` Extend M4's material-specific face and restrained silhouette language
   to later ecology, exploration, and technology content without smoothing the
   pixel-art aesthetic.
