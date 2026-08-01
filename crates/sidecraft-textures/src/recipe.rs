@@ -1,8 +1,5 @@
 use serde::Deserialize;
-use sidecraft_textures::{
-    ClusterShape, GenerateOptions, OrePattern, PackError, PalettePreset, PatternAlgorithm,
-    PlacementAlgorithm, QualityPreset,
-};
+use sidecraft_textures::{GenerateOptions, PackError, randomized_options};
 use std::{collections::BTreeMap, fs, path::Path, str::FromStr};
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -76,7 +73,7 @@ impl Recipe {
         set_overrides: &[String],
     ) -> Result<GenerateOptions, PackError> {
         let mut rng = ChoiceRng::new(seed);
-        let mut options = randomized_defaults(seed, &mut rng);
+        let mut options = randomized_options(seed);
         macro_rules! choose {
             ($field:ident, $kind:ident) => {
                 if let Some(spec) = &self.$field {
@@ -120,58 +117,6 @@ impl Recipe {
             options.apply_material_override(material, field, &value)?;
         }
         Ok(options)
-    }
-}
-
-fn randomized_defaults(seed: u64, rng: &mut ChoiceRng) -> GenerateOptions {
-    let palettes = [
-        PalettePreset::Earthy,
-        PalettePreset::DeepEarth,
-        PalettePreset::Classic,
-    ];
-    let patterns = [
-        PatternAlgorithm::ClusterStamps,
-        PatternAlgorithm::CellularClumps,
-        PatternAlgorithm::BrokenStrata,
-        PatternAlgorithm::ShortWalks,
-    ];
-    let placements = [
-        PlacementAlgorithm::Uniform,
-        PlacementAlgorithm::JitteredGrid,
-        PlacementAlgorithm::PoissonDisc,
-    ];
-    let shapes = [
-        ClusterShape::Mixed,
-        ClusterShape::Polyomino,
-        ClusterShape::Rectangular,
-    ];
-    let ores = [
-        OrePattern::CenterGrowth,
-        OrePattern::BranchingWalk,
-        OrePattern::CompactCellular,
-    ];
-    GenerateOptions {
-        seed,
-        palette: palettes[rng.index(palettes.len())],
-        pattern: patterns[rng.index(patterns.len())],
-        placement: placements[rng.index(placements.len())],
-        cluster_shape: shapes[rng.index(shapes.len())],
-        cluster_size: rng.range(2, 5),
-        cluster_density: rng.float(0.16, 0.24),
-        smoothing_passes: rng.range(0, 1),
-        contrast: rng.float(1.02, 1.10),
-        saturation: rng.float(0.95, 1.08),
-        lightness: rng.float(-0.04, 0.01),
-        variant_strength: rng.range(2, 5) as i16,
-        ore_pattern: ores[rng.index(ores.len())],
-        ore_coverage: rng.float(0.30, 0.35),
-        ore_branches: rng.range(3, 6),
-        ore_thickness: rng.range(2, 3),
-        ore_center_bias: rng.float(0.75, 1.0),
-        leaf_hole_density: rng.float(0.02, 0.06),
-        grass_fringe_depth: rng.range(3, 5),
-        quality: QualityPreset::Balanced,
-        ..Default::default()
     }
 }
 

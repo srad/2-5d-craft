@@ -28,8 +28,8 @@ caves, water, plants, and technology progression of
   foreground/backwall storage, interaction, rendering, lighting, and exact SCW
   schema 5 persistence
 - Verification baseline: confirmed 2026-08-01; formatting, Clippy with warnings
-  denied, 168 automated tests, the release build, and deterministic real-GPU
-  midnight/noon gameplay captures passed locally
+  denied, 168 automated tests, the release build, deterministic real-GPU
+  midnight/noon gameplay captures, and a real-GPU editor launch passed locally
 
 At the start of a work session, mark exactly one item `[~]`. At the end, change
 it to `[x]`, `[!]`, or `[ ]`, record the next concrete item here, and record any
@@ -278,7 +278,8 @@ engine form a coherent living-builder loop.
   scenery.
 - `[x]` Replace shared procedural masks with a separately publishable,
   deterministic texture generator supporting bounded cluster, placement, ore,
-  palette, quality, recipe, batch, and per-material CLI controls.
+  palette, quality, recipe, batch, per-material CLI controls, and an evenly
+  varied small-mark pattern for classic voxel block faces.
 - `[x]` Add schema-1 full and partial texture packs, strict PNG/path validation,
   a checked-in default pack, authoritative previews, global atomic selection,
   live staged menu switching, stable runtime asset handles, environment assets,
@@ -286,6 +287,14 @@ engine form a coherent living-builder loop.
 - `[x]` Replace the runtime preview thumbnail with a responsive fixed-noon live
   voxel showcase across front-end states, including every block, six scenery
   depths, the player palette, shared environment art, and version chrome.
+- `[!]` Add a standalone texture-pack editor with a resizable typed parameter
+  panel, larger controls, coherent one-click candidate generation, debounced
+  revision-safe generation, a Day/Night shaded 3D preview sharing the game
+  showcase layout and framing, exact atomic project save/open, unsaved-change
+  handling, and non-overwriting export through the publishable texture
+  package; all workspace gates, the release build, and a real-GPU launch pass,
+  but manual editor visual acceptance remains pending because the hidden
+  hardware surface could not be captured through the Windows compositor.
 - `[ ]` Add further material-specific face variation and restrained block
   silhouette cues without smoothing the pixel-art aesthetic.
 - `[ ]` Add fluid surfaces, falling-block interpolation, plant animation,

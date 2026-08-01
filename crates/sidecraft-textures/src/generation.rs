@@ -9,7 +9,7 @@ use crate::{
 };
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GeneratedPack {
     pub manifest: PackManifest,
     pub generation: GenerationManifest,
@@ -73,12 +73,60 @@ pub fn generate_pack(options: &GenerateOptions) -> Result<GeneratedPack, PackErr
         seed: options.seed,
         resolved: resolved_values(options),
     };
-    let preview = preview_from_assets(&manifest, &assets);
-    Ok(GeneratedPack {
+    let mut pack = GeneratedPack {
         manifest,
         generation,
         assets,
-        preview,
+        preview: PackImage::solid(320, 180, [0, 0, 0, 255]),
+    };
+    pack.preview = compose_preview(&resolve_generated_pack(&pack)?);
+    Ok(pack)
+}
+
+pub fn resolve_generated_pack(pack: &GeneratedPack) -> Result<ResolvedPack, PackError> {
+    let mut blocks = BTreeMap::new();
+    for block in BlockKind::ALL {
+        for face in Face::ALL {
+            for variant in 0..VARIANT_COUNT {
+                let path = format!("blocks/{}/{}_{}.png", block.slug(), face.slug(), variant);
+                blocks.insert(
+                    (block, face, variant),
+                    pack.assets.get(&path).cloned().ok_or_else(|| {
+                        PackError::Invalid(format!("generated pack is missing {path}"))
+                    })?,
+                );
+            }
+        }
+    }
+    let mut icons = BTreeMap::new();
+    for block in BlockKind::HOTBAR {
+        let path = format!("icons/{}.png", block.slug());
+        icons.insert(
+            block,
+            pack.assets
+                .get(&path)
+                .cloned()
+                .unwrap_or_else(|| blocks[&(block, Face::Side, 0)].clone()),
+        );
+    }
+    let required = |path: &str| {
+        pack.assets
+            .get(path)
+            .cloned()
+            .ok_or_else(|| PackError::Invalid(format!("generated pack is missing {path}")))
+    };
+    Ok(ResolvedPack {
+        manifest: pack.manifest.clone(),
+        player: PlayerPalette::from_complete(&pack.manifest.player)?,
+        blocks,
+        icons,
+        sun: required("environment/sun.png")?,
+        moons: (0..8)
+            .map(|phase| required(&format!("environment/moon_{phase}.png")))
+            .collect::<Result<Vec<_>, _>>()?,
+        stars: required("environment/stars.png")?,
+        cloud: required("environment/cloud.png")?,
+        preview: pack.preview.clone(),
     })
 }
 
@@ -130,44 +178,16 @@ fn color_histogram(image: &PackImage) -> BTreeMap<[u8; 4], usize> {
     histogram
 }
 
-fn preview_from_assets(manifest: &PackManifest, assets: &BTreeMap<String, PackImage>) -> PackImage {
-    let mut blocks = BTreeMap::new();
-    for block in BlockKind::ALL {
-        for face in Face::ALL {
-            for variant in 0..VARIANT_COUNT {
-                blocks.insert(
-                    (block, face, variant),
-                    assets[&format!("blocks/{}/{}_{}.png", block.slug(), face.slug(), variant)]
-                        .clone(),
-                );
-            }
-        }
-    }
-    let resolved = ResolvedPack {
-        manifest: manifest.clone(),
-        player: PlayerPalette::default(),
-        blocks,
-        icons: BTreeMap::new(),
-        sun: assets["environment/sun.png"].clone(),
-        moons: (0..8)
-            .map(|phase| assets[&format!("environment/moon_{phase}.png")].clone())
-            .collect(),
-        stars: assets["environment/stars.png"].clone(),
-        cloud: assets["environment/cloud.png"].clone(),
-        preview: PackImage::solid(320, 180, [0, 0, 0, 255]),
-    };
-    compose_preview(&resolved)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::PatternAlgorithm;
+    use crate::{PatternAlgorithm, load_resolved_pack, write_generated_pack};
 
     #[test]
     fn fixed_seed_replays_every_algorithm() {
         for pattern in [
             PatternAlgorithm::ClusterStamps,
+            PatternAlgorithm::EvenlyVaried,
             PatternAlgorithm::CellularClumps,
             PatternAlgorithm::BrokenStrata,
             PatternAlgorithm::ShortWalks,
@@ -196,6 +216,20 @@ mod tests {
         );
         assert_eq!(pack.preview.width, 320);
         assert_eq!(pack.assets["icons/dirt.png"].width, crate::BLOCK_SIZE);
+    }
+
+    #[test]
+    fn in_memory_resolution_matches_written_pack_loading() {
+        let directory = tempfile::tempdir().unwrap();
+        let generated = generate_pack(&GenerateOptions {
+            seed: 81,
+            ..Default::default()
+        })
+        .unwrap();
+        let in_memory = resolve_generated_pack(&generated).unwrap();
+        let path = write_generated_pack(&generated, directory.path()).unwrap();
+        let from_disk = load_resolved_pack(&path, None).unwrap();
+        assert_eq!(in_memory, from_disk);
     }
 
     #[test]

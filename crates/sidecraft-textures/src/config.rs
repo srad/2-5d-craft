@@ -1,4 +1,12 @@
-use crate::{BlockKind, PackError};
+use crate::{
+    BlockKind, PackError,
+    controls::{
+        CLUSTER_DENSITY_LIMITS, CLUSTER_SIZE_LIMITS, CONTRAST_LIMITS, GRASS_FRINGE_DEPTH_LIMITS,
+        LEAF_HOLE_DENSITY_LIMITS, LIGHTNESS_LIMITS, ORE_BRANCHES_LIMITS, ORE_CENTER_BIAS_LIMITS,
+        ORE_COVERAGE_LIMITS, ORE_THICKNESS_LIMITS, SATURATION_LIMITS, SMOOTHING_PASSES_LIMITS,
+        VARIANT_STRENGTH_LIMITS,
+    },
+};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -17,6 +25,7 @@ pub enum PalettePreset {
 pub enum PatternAlgorithm {
     #[default]
     ClusterStamps,
+    EvenlyVaried,
     CellularClumps,
     BrokenStrata,
     ShortWalks,
@@ -162,58 +171,80 @@ const MATERIAL_FIELDS: &[&str] = &[
     "grass-fringe-depth",
 ];
 
-pub(crate) fn validate_options(options: &GenerateOptions) -> Result<(), PackError> {
+pub fn validate_options(options: &GenerateOptions) -> Result<(), PackError> {
+    let finite = [
+        options.cluster_density,
+        options.contrast,
+        options.saturation,
+        options.lightness,
+        options.ore_coverage,
+        options.ore_center_bias,
+        options.leaf_hole_density,
+    ]
+    .into_iter()
+    .all(f32::is_finite);
+    if !finite {
+        return Err(PackError::Invalid(
+            "generator parameters must contain only finite numbers".into(),
+        ));
+    }
     let checks = [
         (
-            (1..=12).contains(&options.cluster_size),
+            (CLUSTER_SIZE_LIMITS.min..=CLUSTER_SIZE_LIMITS.max).contains(&options.cluster_size),
             "cluster-size must be in 1..=12",
         ),
         (
-            (0.04..=0.48).contains(&options.cluster_density),
+            (CLUSTER_DENSITY_LIMITS.min..=CLUSTER_DENSITY_LIMITS.max)
+                .contains(&options.cluster_density),
             "cluster-density must be in 0.04..=0.48",
         ),
         (
-            options.smoothing_passes <= 2,
+            (SMOOTHING_PASSES_LIMITS.min..=SMOOTHING_PASSES_LIMITS.max)
+                .contains(&options.smoothing_passes),
             "smoothing-passes must be in 0..=2",
         ),
         (
-            (0.65..=1.5).contains(&options.contrast),
+            (CONTRAST_LIMITS.min..=CONTRAST_LIMITS.max).contains(&options.contrast),
             "contrast must be in 0.65..=1.5",
         ),
         (
-            (0.5..=1.5).contains(&options.saturation),
+            (SATURATION_LIMITS.min..=SATURATION_LIMITS.max).contains(&options.saturation),
             "saturation must be in 0.5..=1.5",
         ),
         (
-            (-0.25..=0.25).contains(&options.lightness),
+            (LIGHTNESS_LIMITS.min..=LIGHTNESS_LIMITS.max).contains(&options.lightness),
             "lightness must be in -0.25..=0.25",
         ),
         (
-            (0..=16).contains(&options.variant_strength),
+            (VARIANT_STRENGTH_LIMITS.0..=VARIANT_STRENGTH_LIMITS.1)
+                .contains(&options.variant_strength),
             "variant-strength must be in 0..=16",
         ),
         (
-            (0.30..=0.35).contains(&options.ore_coverage),
+            (ORE_COVERAGE_LIMITS.min..=ORE_COVERAGE_LIMITS.max).contains(&options.ore_coverage),
             "ore-coverage must be in 0.30..=0.35",
         ),
         (
-            (1..=10).contains(&options.ore_branches),
+            (ORE_BRANCHES_LIMITS.min..=ORE_BRANCHES_LIMITS.max).contains(&options.ore_branches),
             "ore-branches must be in 1..=10",
         ),
         (
-            (1..=4).contains(&options.ore_thickness),
+            (ORE_THICKNESS_LIMITS.min..=ORE_THICKNESS_LIMITS.max).contains(&options.ore_thickness),
             "ore-thickness must be in 1..=4",
         ),
         (
-            (0.0..=1.0).contains(&options.ore_center_bias),
+            (ORE_CENTER_BIAS_LIMITS.min..=ORE_CENTER_BIAS_LIMITS.max)
+                .contains(&options.ore_center_bias),
             "ore-center-bias must be in 0..=1",
         ),
         (
-            (0.0..=0.2).contains(&options.leaf_hole_density),
+            (LEAF_HOLE_DENSITY_LIMITS.min..=LEAF_HOLE_DENSITY_LIMITS.max)
+                .contains(&options.leaf_hole_density),
             "leaf-hole-density must be in 0..=0.2",
         ),
         (
-            (1..=7).contains(&options.grass_fringe_depth),
+            (GRASS_FRINGE_DEPTH_LIMITS.min..=GRASS_FRINGE_DEPTH_LIMITS.max)
+                .contains(&options.grass_fringe_depth),
             "grass-fringe-depth must be in 1..=7",
         ),
     ];
@@ -266,6 +297,7 @@ fn parse<T: std::str::FromStr>(value: &str, field: &str) -> Result<T, PackError>
 fn parse_pattern(value: &str) -> Result<PatternAlgorithm, PackError> {
     match value {
         "cluster-stamps" => Ok(PatternAlgorithm::ClusterStamps),
+        "evenly-varied" => Ok(PatternAlgorithm::EvenlyVaried),
         "cellular-clumps" => Ok(PatternAlgorithm::CellularClumps),
         "broken-strata" => Ok(PatternAlgorithm::BrokenStrata),
         "short-walks" => Ok(PatternAlgorithm::ShortWalks),

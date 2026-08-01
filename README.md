@@ -158,6 +158,21 @@ supported. See the
 [`sidecraft-textures` package guide](crates/sidecraft-textures/README.md) and
 the [earthy example recipe](crates/sidecraft-textures/recipes/earthy.toml).
 
+The standalone visual editor exposes every typed generator parameter beside a
+shaded 3D game-scene preview with Day/Night switching, coherent one-click
+variation generation, in-game-equivalent framing, automatic regeneration,
+exact versioned `*.sctex.toml` projects, and export of the displayed result:
+
+```powershell
+cargo run -p sidecraft-texture-editor
+```
+
+On Windows, `.\editor.ps1` launches the release editor directly.
+
+It depends only on the publishable texture package and Bevy/egui presentation,
+not on Sidecraft gameplay. See the
+[`sidecraft-texture-editor` guide](crates/sidecraft-texture-editor/README.md).
+
 ## Architecture
 
 The library points dependencies inward from adapters to application services

@@ -11,8 +11,9 @@ published on its own.
 
 ## Generate
 
-With no arguments, the CLI chooses a random seed and safe random values for
-every control. It creates a new folder and never overwrites an existing pack:
+With no arguments, the CLI chooses a random seed and one coherent safe profile
+for the selected pixel-pattern algorithm. It creates a new folder and never
+overwrites an existing pack:
 
 ```powershell
 cargo run -p sidecraft-textures --
@@ -26,7 +27,7 @@ cargo run -p sidecraft-textures -- generate `
   --seed 42 `
   --count 3 `
   --palette earthy `
-  --pattern cluster-stamps,cellular-clumps `
+  --pattern evenly-varied,cluster-stamps `
   --placement poisson-disc `
   --cluster-size 2..5 `
   --ore-pattern center-growth,branching-walk `
@@ -39,6 +40,12 @@ sampled per generated pack. Precedence is safe randomized defaults, an
 optional recipe, global CLI controls, then repeatable material `--set`
 overrides.
 
+`evenly-varied` produces a Minecraft-inspired restrained field of isolated
+pixels and short orthogonal marks spread across the tile. It avoids dominant
+diagonals, stripes, high-frequency noise, and large connected clumps. The
+other pattern choices remain available for materials that benefit from more
+pronounced clusters, cellular areas, strata, or short walks.
+
 Other commands:
 
 ```powershell
@@ -47,6 +54,18 @@ cargo run -p sidecraft-textures -- validate texture-packs/my-pack
 cargo run -p sidecraft-textures -- validate assets/texture-packs/default --complete
 cargo run -p sidecraft-textures -- preview texture-packs/my-pack
 ```
+
+Generate from an exact editor project:
+
+```powershell
+cargo run -p sidecraft-textures -- generate `
+  --project my-pack.sctex.toml `
+  --output texture-packs
+```
+
+In project mode, only `--output` may accompany `--project`. The project already
+contains the seed, metadata, and every exact control, so recipe, batch,
+metadata, seed, global-control, and material override arguments are rejected.
 
 Generation writes into a hidden sibling directory, validates the complete
 pack, writes the resolved recipe and preview, and only then renames it into
@@ -98,3 +117,65 @@ shirt = [25, 91, 105]
 IDs, dimensions, file sizes, PNG decoding, transparency, schema versions, and
 symlinks are validated. Only leaves, torches, and environment/UI images may
 contain transparent pixels.
+
+## Exact project schema 1
+
+The visual editor and CLI share a human-readable `*.sctex.toml` format:
+
+```toml
+project-schema-version = 1
+generator-version = 1
+seed = 42
+
+[pack]
+id = "earth-42"
+name = "Earth 42"
+author = "Author"
+
+[parameters]
+palette = "earthy"
+pattern = "cluster-stamps"
+placement = "jittered-grid"
+cluster-shape = "mixed"
+cluster-size = 4
+cluster-density = 0.2
+smoothing-passes = 1
+contrast = 1.06
+saturation = 1.0
+lightness = -0.02
+variant-strength = 4
+ore-pattern = "center-growth"
+ore-coverage = 0.32
+ore-branches = 4
+ore-thickness = 2
+ore-center-bias = 0.88
+leaf-hole-density = 0.04
+grass-fringe-depth = 4
+quality = "balanced"
+
+[material.stone]
+pattern = "broken-strata"
+contrast = 1.1
+```
+
+This format stores exact typed values and is separate from range/choice recipe
+files. Reads deny unknown fields and validate both versions, metadata, finite
+numbers, bounds, materials, and whether each material override has an effect.
+Writes atomically replace the target file.
+
+Library users can inspect `CONTROL_DEFINITIONS`; every generator control
+declares its stable key, label, semantic data type, numeric range and step, or
+predefined choice values. `material_fields` declares which controls actually
+affect each material. The same definitions drive validation and the editor UI.
+`SHOWCASE` supplies a deterministic, Bevy-free fixed-scene contract—including
+dimensions, inspection area, block cells, and torch mounts—that the game and
+standalone editor render through their own presentation adapters.
+
+Run the standalone editor with:
+
+```powershell
+cargo run -p sidecraft-texture-editor
+```
+
+See the
+[`sidecraft-texture-editor` guide](../sidecraft-texture-editor/README.md).

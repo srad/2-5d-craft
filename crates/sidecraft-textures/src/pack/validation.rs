@@ -67,13 +67,17 @@ fn validate_manifest(manifest: &PackManifest) -> Result<(), PackError> {
             manifest.schema_version
         )));
     }
-    validate_id(&manifest.id)?;
-    if manifest.name.trim().is_empty() || manifest.name.len() > 80 {
+    validate_metadata(&manifest.id, &manifest.name, &manifest.author)
+}
+
+pub(crate) fn validate_metadata(id: &str, name: &str, author: &str) -> Result<(), PackError> {
+    validate_id(id)?;
+    if name.trim().is_empty() || name.len() > 80 {
         return Err(PackError::Invalid(
             "pack name must contain 1 to 80 characters".into(),
         ));
     }
-    if manifest.author.trim().is_empty() || manifest.author.len() > 80 {
+    if author.trim().is_empty() || author.len() > 80 {
         return Err(PackError::Invalid(
             "pack author must contain 1 to 80 characters".into(),
         ));

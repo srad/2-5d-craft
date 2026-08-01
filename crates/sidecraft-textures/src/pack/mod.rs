@@ -14,6 +14,7 @@ pub use format::{
 };
 pub use loading::{load_resolved_pack, read_manifest};
 pub use preview::compose_preview;
+pub(crate) use validation::validate_metadata;
 pub use validation::validate_pack;
 pub use writing::{initialize_recipe, write_generated_pack, write_preview};
 

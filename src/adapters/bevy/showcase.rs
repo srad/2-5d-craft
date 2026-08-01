@@ -14,15 +14,7 @@ use crate::{
     },
     domain::{BlockState, DayCycle, LightVolume, NOON_TICKS},
 };
-
-const SCENE_MIN_X: i64 = -24;
-const SCENE_WIDTH: i32 = 48;
-const SCENE_HEIGHT: i32 = 27;
-const SCENE_DEPTH: u8 = 6;
-const SHOWCASE_SEED: u64 = 0x51DE_CAFE;
-const INSPECTION_WIDTH: f32 = 36.0;
-const INSPECTION_HEIGHT: f32 = 20.0;
-const CAMERA_TARGET: Vec2 = Vec2::new(0.0, 11.5);
+use sidecraft_textures::{BlockKind as PackBlock, SHOWCASE, ShowcaseTorchMount};
 
 #[derive(Component)]
 struct MenuShowcaseRoot;
@@ -81,18 +73,18 @@ fn spawn_showcase(
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     let light = LightVolume::calculate(
-        SCENE_MIN_X,
-        SCENE_MIN_X + i64::from(SCENE_WIDTH),
-        SCENE_HEIGHT,
-        SCENE_DEPTH,
+        SHOWCASE.min_x,
+        SHOWCASE.min_x + i64::from(SHOWCASE.width),
+        SHOWCASE.height,
+        SHOWCASE.depth,
         |x, y, depth| showcase_block(x, y, i32::from(depth)),
     );
     let scene = build_voxel_scene_meshes(
-        SCENE_MIN_X,
-        SCENE_WIDTH,
-        SCENE_HEIGHT,
-        SCENE_DEPTH,
-        SHOWCASE_SEED,
+        SHOWCASE.min_x,
+        SHOWCASE.width,
+        SHOWCASE.height,
+        SHOWCASE.depth,
+        SHOWCASE.seed,
         &light,
         showcase_block,
     );
@@ -102,7 +94,7 @@ fn spawn_showcase(
     commands
         .spawn((
             MenuShowcaseRoot,
-            Transform::from_xyz(SCENE_MIN_X as f32, 0.0, 0.0),
+            Transform::from_xyz(SHOWCASE.min_x as f32, 0.0, 0.0),
             Visibility::Hidden,
         ))
         .with_children(|root| {
@@ -246,12 +238,12 @@ fn fit_showcase_camera(
     if !uses_showcase(*state.get()) {
         return;
     }
-    let scale = (INSPECTION_WIDTH / window.width())
-        .max(INSPECTION_HEIGHT / window.height())
+    let scale = (SHOWCASE.inspection_width / window.width())
+        .max(SHOWCASE.inspection_height / window.height())
         .max(0.000_1);
     let (mut camera_transform, mut camera_projection) = camera.into_inner();
     frame_camera(
-        CAMERA_TARGET,
+        Vec2::from_array(SHOWCASE.camera_target),
         scale,
         &mut camera_transform,
         &mut camera_projection,
@@ -266,82 +258,21 @@ fn restore_game_camera_scale(mut camera: Single<&mut Projection, With<GameCamera
 }
 
 fn showcase_block(x: i64, y: i32, depth: i32) -> Option<BlockState> {
-    if !(SCENE_MIN_X..SCENE_MIN_X + i64::from(SCENE_WIDTH)).contains(&x)
-        || !(0..SCENE_HEIGHT).contains(&y)
-        || !(0..i32::from(SCENE_DEPTH)).contains(&depth)
-    {
-        return None;
-    }
-    if depth == 0 {
-        foreground_block(x, y)
-    } else {
-        rear_block(x, y, depth)
-    }
-}
-
-fn foreground_block(x: i64, y: i32) -> Option<BlockState> {
-    match (x, y) {
-        (0, 3) => return Some(BlockState::TORCH),
-        (-7, 6) => return Some(BlockState::WALL_TORCH_RIGHT),
-        (7, 6) => return Some(BlockState::WALL_TORCH_LEFT),
-        (-8, 4 | 5) | (-9, 5) => return Some(BlockState::COAL_ORE),
-        (8, 5 | 6) | (9, 5) => return Some(BlockState::IRON_ORE),
-        _ => {}
-    }
-    let surface = foreground_surface(x);
-    for tree_x in [-14, 14] {
-        let tree_surface = foreground_surface(tree_x);
-        if x == tree_x && (tree_surface + 1..=tree_surface + 5).contains(&y) {
-            return Some(BlockState::WOOD);
-        }
-        let crown_y = tree_surface + 6;
-        let dx = (x - tree_x).unsigned_abs();
-        let dy = (y - crown_y).unsigned_abs();
-        if dx <= 3 && dy <= 2 && dx + u64::from(dy) <= 4 {
-            return Some(BlockState::LEAVES);
-        }
-    }
-    if (-7..=7).contains(&x) && (3..=8).contains(&y) {
-        return None;
-    }
-    terrain_block(surface, y)
-}
-
-fn rear_block(x: i64, y: i32, depth: i32) -> Option<BlockState> {
-    let shifted = x + i64::from(depth * 3);
-    let surface =
-        9 + match shifted {
-            value if value < -14 => 4,
-            value if value < -6 => 2,
-            value if value < 8 => 0,
-            value if value < 16 => 2,
-            _ => 4,
-        } + depth % 2;
-    terrain_block(surface, y)
-}
-
-fn foreground_surface(x: i64) -> i32 {
-    match x {
-        value if value < -18 => 16,
-        value if value < -10 => 13,
-        value if value < 10 => 11,
-        value if value < 18 => 13,
-        _ => 16,
-    }
-}
-
-fn terrain_block(surface: i32, y: i32) -> Option<BlockState> {
-    if y > surface {
-        None
-    } else if y == 0 {
-        Some(BlockState::BEDROCK)
-    } else if y == surface {
-        Some(BlockState::GRASS)
-    } else if y >= surface - 3 {
-        Some(BlockState::DIRT)
-    } else {
-        Some(BlockState::STONE)
-    }
+    let cell = SHOWCASE.cell(x, y, depth)?;
+    Some(match (cell.block, cell.torch_mount) {
+        (PackBlock::Grass, None) => BlockState::GRASS,
+        (PackBlock::Dirt, None) => BlockState::DIRT,
+        (PackBlock::Stone, None) => BlockState::STONE,
+        (PackBlock::CoalOre, None) => BlockState::COAL_ORE,
+        (PackBlock::IronOre, None) => BlockState::IRON_ORE,
+        (PackBlock::Wood, None) => BlockState::WOOD,
+        (PackBlock::Leaves, None) => BlockState::LEAVES,
+        (PackBlock::Bedrock, None) => BlockState::BEDROCK,
+        (PackBlock::Torch, Some(ShowcaseTorchMount::Floor)) => BlockState::TORCH,
+        (PackBlock::Torch, Some(ShowcaseTorchMount::WallLeft)) => BlockState::WALL_TORCH_LEFT,
+        (PackBlock::Torch, Some(ShowcaseTorchMount::WallRight)) => BlockState::WALL_TORCH_RIGHT,
+        _ => unreachable!("shared showcase cells keep block and mount consistent"),
+    })
 }
 
 #[cfg(test)]
@@ -351,10 +282,11 @@ mod tests {
 
     #[test]
     fn showcase_contains_every_block_state() {
-        let states = (SCENE_MIN_X..SCENE_MIN_X + i64::from(SCENE_WIDTH))
+        let states = (SHOWCASE.min_x..SHOWCASE.min_x + i64::from(SHOWCASE.width))
             .flat_map(|x| {
-                (0..SCENE_HEIGHT).flat_map(move |y| {
-                    (0..i32::from(SCENE_DEPTH)).filter_map(move |depth| showcase_block(x, y, depth))
+                (0..SHOWCASE.height).flat_map(move |y| {
+                    (0..i32::from(SHOWCASE.depth))
+                        .filter_map(move |depth| showcase_block(x, y, depth))
                 })
             })
             .collect::<HashSet<_>>();
@@ -366,9 +298,10 @@ mod tests {
     #[test]
     fn common_aspect_ratios_keep_the_inspection_area_inside_overscan() {
         for (width, height) in [(800.0, 450.0), (1024.0, 768.0), (2560.0, 1080.0)] {
-            let scale = (INSPECTION_WIDTH / width).max(INSPECTION_HEIGHT / height);
-            assert!(width * scale <= SCENE_WIDTH as f32);
-            assert!(height * scale <= SCENE_HEIGHT as f32);
+            let scale =
+                (SHOWCASE.inspection_width / width).max(SHOWCASE.inspection_height / height);
+            assert!(width * scale <= SHOWCASE.width as f32);
+            assert!(height * scale <= SHOWCASE.height as f32);
         }
     }
 }

@@ -49,6 +49,9 @@ adapters/
     bevy/       ECS and presentation integrations
     storage/    schema-5 SCW package repository
 crates/
+    sidecraft-texture-editor/
+                Standalone Bevy/egui texture-project editor; depends on
+                sidecraft-textures and never on the Sidecraft game package
     sidecraft-textures/
                 Bevy-free texture-pack format, generator, validator, and CLI
 lib.rs          composition root and schedule ordering
@@ -173,9 +176,26 @@ struct BlockState {
   They do not drive directional PBR lights or cast smooth real-time shadows.
 - Texture packs are versioned data, never executable code. The Bevy-free
   `sidecraft-textures` package owns schema validation, partial-pack fallback,
-  deterministic generation, and preview composition. The Bevy adapter owns
-  global selection and replaces atlas, environment, hotbar, and player-color
-  asset contents in place so runtime handles remain stable.
+  deterministic generation, preview composition, and the fixed Bevy-free
+  showcase layout shared by the game and editor. The Bevy adapter owns global
+  selection and replaces atlas, environment, hotbar, and player-color asset
+  contents in place so runtime handles remain stable.
+- Exact texture projects are owned by `sidecraft-textures`, not by a UI. Each
+  project records its project schema and generator version and stores typed
+  exact values. The package also owns every control's semantic data type,
+  range, step, predefined choices, and per-material applicability. Flexible
+  probabilistic recipes remain a separate CLI format.
+- `sidecraft-texture-editor` is a separate composition root. Its document,
+  generation, native-file, export, UI, and preview lifecycles remain separate
+  modules. It consumes only public `sidecraft-textures` APIs and never imports
+  Sidecraft game code. Its preview renders the shared showcase as actual
+  nearest-neighbor 3D geometry with editor-local static face, ambient-occlusion,
+  sky, and torch shading. Day/night selection is session-only presentation
+  state and never changes project data. Preview generation is single-flight
+  and revisioned: stale task results are discarded, the last valid scene
+  remains visible, and export accepts only the exact revision currently
+  displayed. Atlas, mesh, environment, and player-material handles remain
+  stable while their asset contents are replaced.
 - Front-end menus are a state-driven subsystem under `bevy::ui::menus`.
   Ordinary navigation owns no world lifecycle work: new/load/save actions are
   translated into session commands, while menu-local state changes remain

@@ -43,10 +43,83 @@ pub(crate) fn best_pattern(rng: &mut FixedRng, options: &GenerateOptions) -> [u8
 fn generate_pattern(rng: &mut FixedRng, options: &GenerateOptions) -> [u8; PIXELS] {
     match options.pattern {
         PatternAlgorithm::ClusterStamps => cluster_stamps(rng, options),
+        PatternAlgorithm::EvenlyVaried => evenly_varied(rng, options),
         PatternAlgorithm::CellularClumps => cellular_clumps(rng, options),
         PatternAlgorithm::BrokenStrata => broken_strata(rng, options),
         PatternAlgorithm::ShortWalks => short_walks(rng, options),
     }
+}
+
+fn evenly_varied(rng: &mut FixedRng, options: &GenerateOptions) -> [u8; PIXELS] {
+    let target = (options.cluster_density * PIXELS as f32)
+        .round()
+        .clamp(24.0, 64.0) as usize;
+    let maximum_mark = options.cluster_size.clamp(1, 3);
+    let mut output = [0_u8; PIXELS];
+    while nonzero_count(&output) < target {
+        let origin = best_spaced_point(rng, &output);
+        let remaining = target - nonzero_count(&output);
+        let length = if maximum_mark == 1 {
+            1
+        } else {
+            rng.range(1, maximum_mark).min(remaining)
+        };
+        let direction = CARDINALS[rng.index(CARDINALS.len())];
+        for step in 0..length {
+            let x = origin.0 + direction.0 * step as i32;
+            let y = origin.1 + direction.1 * step as i32;
+            if !inside(x, y) || get_index(&output, x, y) != 0 {
+                continue;
+            }
+            set_index(&mut output, x, y, if rng.chance(0.24) { 2 } else { 1 });
+        }
+        if get_index(&output, origin.0, origin.1) == 0 {
+            set_index(&mut output, origin.0, origin.1, 1);
+        }
+    }
+    output
+}
+
+fn best_spaced_point(rng: &mut FixedRng, output: &[u8; PIXELS]) -> (i32, i32) {
+    let occupied = output
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| **value != 0)
+        .map(|(index, _)| {
+            (
+                (index % SIDE as usize) as i32,
+                (index / SIDE as usize) as i32,
+            )
+        })
+        .collect::<Vec<_>>();
+    if occupied.is_empty() {
+        return (rng.index(16) as i32, rng.index(16) as i32);
+    }
+    let mut best = None;
+    for _ in 0..24 {
+        let candidate = (rng.index(16) as i32, rng.index(16) as i32);
+        if get_index(output, candidate.0, candidate.1) != 0 {
+            continue;
+        }
+        let separation = occupied
+            .iter()
+            .map(|&(x, y)| (x - candidate.0).abs() + (y - candidate.1).abs())
+            .min()
+            .unwrap_or(0);
+        if best.is_none_or(|(_, best_separation)| separation > best_separation) {
+            best = Some((candidate, separation));
+        }
+    }
+    best.map_or_else(
+        || {
+            output
+                .iter()
+                .position(|value| *value == 0)
+                .map(|index| ((index % 16) as i32, (index / 16) as i32))
+                .expect("even variation stops before the tile is full")
+        },
+        |(point, _)| point,
+    )
 }
 
 fn seed_points(rng: &mut FixedRng, options: &GenerateOptions, count: usize) -> Vec<(i32, i32)> {
@@ -415,6 +488,7 @@ mod tests {
     fn all_pattern_algorithms_terminate_and_are_deterministic() {
         for pattern in [
             PatternAlgorithm::ClusterStamps,
+            PatternAlgorithm::EvenlyVaried,
             PatternAlgorithm::CellularClumps,
             PatternAlgorithm::BrokenStrata,
             PatternAlgorithm::ShortWalks,
@@ -430,6 +504,29 @@ mod tests {
                 best_pattern(&mut second, &options)
             );
         }
+    }
+
+    #[test]
+    fn evenly_varied_distributes_small_marks_across_the_tile() {
+        let options = GenerateOptions {
+            seed: 19,
+            pattern: PatternAlgorithm::EvenlyVaried,
+            cluster_size: 2,
+            cluster_density: 0.2,
+            smoothing_passes: 0,
+            ..Default::default()
+        };
+        let mut rng = FixedRng::new(options.seed);
+        let pattern = best_pattern(&mut rng, &options);
+        let quadrants =
+            [(0..8, 0..8), (8..16, 0..8), (0..8, 8..16), (8..16, 8..16)].map(|(xs, ys)| {
+                ys.flat_map(|y| xs.clone().map(move |x| (y * 16 + x) as usize))
+                    .filter(|index| pattern[*index] != 0)
+                    .count()
+            });
+        assert!(quadrants.into_iter().all(|count| count >= 8));
+        assert!((48..=54).contains(&nonzero_count(&pattern)));
+        assert!(artifact_metrics(&pattern).orientation_imbalance < 0.45);
     }
 
     #[test]

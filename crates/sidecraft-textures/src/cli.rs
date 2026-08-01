@@ -1,13 +1,10 @@
 use crate::recipe::Recipe;
 use clap::{Args, Parser, Subcommand};
 use sidecraft_textures::{
-    PackError, initialize_recipe, load_resolved_pack, validate_pack, write_generated_pack,
-    write_preview,
+    PackError, initialize_recipe, load_resolved_pack, load_texture_project, validate_pack,
+    write_generated_pack, write_preview,
 };
-use std::{
-    path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -57,6 +54,8 @@ struct GenerateArgs {
     author: Option<String>,
     #[arg(long)]
     recipe: Option<PathBuf>,
+    #[arg(long, value_name = "FILE")]
+    project: Option<PathBuf>,
     #[arg(long)]
     palette: Option<String>,
     #[arg(long)]
@@ -109,6 +108,7 @@ impl Default for GenerateArgs {
             name_prefix: None,
             author: None,
             recipe: None,
+            project: None,
             palette: None,
             pattern: None,
             placement: None,
@@ -172,6 +172,14 @@ impl Cli {
 }
 
 fn generate(arguments: GenerateArgs) -> Result<(), PackError> {
+    if let Some(path) = &arguments.project {
+        arguments.validate_project_mode()?;
+        let project = load_texture_project(path)?;
+        let pack = sidecraft_textures::generate_pack(&project.to_generate_options()?)?;
+        let path = write_generated_pack(&pack, &arguments.output)?;
+        println!("generated {}", path.display());
+        return Ok(());
+    }
     if arguments.id.is_some() && arguments.count != 1 {
         return Err(PackError::Invalid(
             "--id can only be used when --count is 1".into(),
@@ -215,6 +223,42 @@ fn generate(arguments: GenerateArgs) -> Result<(), PackError> {
 }
 
 impl GenerateArgs {
+    fn validate_project_mode(&self) -> Result<(), PackError> {
+        let has_conflict = self.seed.is_some()
+            || self.count != 1
+            || self.id.is_some()
+            || self.name_prefix.is_some()
+            || self.author.is_some()
+            || self.recipe.is_some()
+            || self.palette.is_some()
+            || self.pattern.is_some()
+            || self.placement.is_some()
+            || self.cluster_shape.is_some()
+            || self.cluster_size.is_some()
+            || self.cluster_density.is_some()
+            || self.smoothing_passes.is_some()
+            || self.contrast.is_some()
+            || self.saturation.is_some()
+            || self.lightness.is_some()
+            || self.variant_strength.is_some()
+            || self.ore_pattern.is_some()
+            || self.ore_coverage.is_some()
+            || self.ore_branches.is_some()
+            || self.ore_thickness.is_some()
+            || self.ore_center_bias.is_some()
+            || self.leaf_hole_density.is_some()
+            || self.grass_fringe_depth.is_some()
+            || self.quality.is_some()
+            || !self.set_overrides.is_empty();
+        if has_conflict {
+            return Err(PackError::Invalid(
+                "--project only accepts --output; the project contains every generation value"
+                    .into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn recipe_overlay(&self) -> Recipe {
         Recipe {
             palette: self.palette.clone(),
@@ -242,11 +286,7 @@ impl GenerateArgs {
 }
 
 fn random_seed() -> u64 {
-    let time = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64;
-    time ^ u64::from(std::process::id()).rotate_left(17)
+    sidecraft_textures::random_seed()
 }
 
 fn slug(value: &str) -> String {
@@ -274,6 +314,7 @@ fn slug(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sidecraft_textures::{TextureProject, save_texture_project};
 
     #[test]
     fn no_arguments_select_random_generation() {
@@ -308,5 +349,37 @@ mod tests {
     #[test]
     fn names_are_safe_pack_ids() {
         assert_eq!(slug("My Rich Pack!"), "my-rich-pack");
+    }
+
+    #[test]
+    fn project_mode_accepts_only_an_output_override() {
+        let valid = GenerateArgs {
+            project: Some(PathBuf::from("project.sctex.toml")),
+            output: PathBuf::from("exports"),
+            ..Default::default()
+        };
+        assert!(valid.validate_project_mode().is_ok());
+        let invalid = GenerateArgs {
+            project: Some(PathBuf::from("project.sctex.toml")),
+            seed: Some(4),
+            ..Default::default()
+        };
+        assert!(invalid.validate_project_mode().is_err());
+    }
+
+    #[test]
+    fn exact_project_mode_generates_a_complete_pack() {
+        let directory = tempfile::tempdir().unwrap();
+        let project_path = directory.path().join("project.sctex.toml");
+        let output = directory.path().join("packs");
+        let project = TextureProject::randomized(19);
+        save_texture_project(&project, &project_path).unwrap();
+        generate(GenerateArgs {
+            project: Some(project_path),
+            output: output.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+        sidecraft_textures::validate_pack(&output.join(project.pack.id), true).unwrap();
     }
 }

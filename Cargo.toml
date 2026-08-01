@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/sidecraft-textures"]
+members = ["crates/sidecraft-texture-editor", "crates/sidecraft-textures"]
 resolver = "3"
 
 [package]

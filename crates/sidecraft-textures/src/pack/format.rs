@@ -181,7 +181,7 @@ impl PlayerPalette {
         }
     }
 
-    pub(super) fn from_complete(partial: &PartialPlayerPalette) -> Result<Self, PackError> {
+    pub(crate) fn from_complete(partial: &PartialPlayerPalette) -> Result<Self, PackError> {
         Ok(Self {
             skin: required_color(partial.skin, "player.skin")?,
             shirt: required_color(partial.shirt, "player.shirt")?,
@@ -203,7 +203,7 @@ pub struct GenerationManifest {
     pub resolved: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedPack {
     pub manifest: PackManifest,
     pub player: PlayerPalette,
