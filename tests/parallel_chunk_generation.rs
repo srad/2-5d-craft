@@ -1,5 +1,5 @@
 use bevy::tasks::{AsyncComputeTaskPool, TaskPoolBuilder, block_on};
-use sidecraft::domain::{BlockState, CHUNK_WIDTH, generate_chunk, surface_height};
+use sidecraft::domain::{BlockState, CHUNK_WIDTH, VoxelLayer, generate_chunk, surface_height};
 
 #[test]
 fn chunks_generate_concurrently_without_seams_or_shared_state() {
@@ -24,7 +24,7 @@ fn chunks_generate_concurrently_without_seams_or_shared_state() {
             let surface = surface_height(seed, world_x);
             let index = (surface * CHUNK_WIDTH + local_x) as usize;
             assert_eq!(
-                BlockState::from_code(chunk.blocks()[index]),
+                BlockState::from_code(chunk.blocks(VoxelLayer::Foreground)[index]),
                 Some(BlockState::GRASS)
             );
         }

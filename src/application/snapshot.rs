@@ -28,7 +28,8 @@ pub struct PlayerSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkSnapshot {
     pub x: i64,
-    pub blocks: Vec<u8>,
+    pub foreground: Vec<u8>,
+    pub backwall: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,22 +85,26 @@ pub fn validate_snapshot(snapshot: &WorldSnapshot) -> Result<(), SnapshotError> 
                 chunk.x
             )));
         }
-        if chunk.blocks.len() != chunk_area {
-            return Err(SnapshotError(format!(
-                "chunk {} has {} blocks; expected {chunk_area}",
-                chunk.x,
-                chunk.blocks.len()
-            )));
-        }
-        if chunk
-            .blocks
-            .iter()
-            .any(|code| *code != 0 && BlockState::from_code(*code).is_none())
-        {
-            return Err(SnapshotError(format!(
-                "chunk {} contains an invalid block code",
-                chunk.x
-            )));
+        for (layer, blocks) in [
+            ("foreground", &chunk.foreground),
+            ("backwall", &chunk.backwall),
+        ] {
+            if blocks.len() != chunk_area {
+                return Err(SnapshotError(format!(
+                    "chunk {} {layer} has {} blocks; expected {chunk_area}",
+                    chunk.x,
+                    blocks.len()
+                )));
+            }
+            if blocks
+                .iter()
+                .any(|code| *code != 0 && BlockState::from_code(*code).is_none())
+            {
+                return Err(SnapshotError(format!(
+                    "chunk {} {layer} contains an invalid block code",
+                    chunk.x
+                )));
+            }
         }
         if previous.is_some_and(|value| value >= chunk.x) {
             return Err(SnapshotError(

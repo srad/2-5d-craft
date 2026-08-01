@@ -21,14 +21,15 @@ caves, water, plants, and technology progression of
 ## Resume here
 
 - Active item: none
-- Next item: M1.3 — add one local PowerShell quality-gate command
+- Next item: M2.2 — streaming
+- Deferred item: M1.3 — add one local PowerShell quality-gate command
 - Blocker: none
-- Last completed work item: M6 menu-presentation slice — added state-driven
-  Settings and Texture Packs menus, staged live pack previews, and a responsive
-  fixed-scene voxel showcase across front-end states
-- Verification baseline: confirmed 2026-07-29; formatting, Clippy with warnings
-  denied, 128 automated tests, the release build, and real-GPU gameplay,
-  texture-pack, and live main-menu captures passed locally
+- Last completed work item: M2.1 persistent layers — added independent editable
+  foreground/backwall storage, interaction, rendering, lighting, and exact SCW
+  schema 5 persistence
+- Verification baseline: confirmed 2026-08-01; formatting, Clippy with warnings
+  denied, 168 automated tests, the release build, and deterministic real-GPU
+  midnight/noon gameplay captures passed locally
 
 At the start of a work session, mark exactly one item `[~]`. At the end, change
 it to `[x]`, `[!]`, or `[ ]`, record the next concrete item here, and record any
@@ -71,7 +72,7 @@ from code inspection alone.
   separated in M1.1.
 - `[x]` The schema-compatible single-file SCW1 world reader was deleted in
   M1.1.
-- `[!]` Rear depth slices are generated scenery, not an editable backwall.
+- `[x]` Rear depth slices include an editable, persistent backwall.
 - `[!]` There is no bounded block-simulation engine.
 
 ## M1 — Architecture foundation `[ ]`
@@ -116,17 +117,17 @@ local gates pass.
 
 ## M2 — Layered world and fresh SCW schema `[ ]`
 
-### M2.1 Persistent layers
+### M2.1 Persistent layers `[x]`
 
-- `[ ]` Store foreground and backwall as independent dense chunk layers.
-- `[ ]` Initialize both layers from depths 0 and 1 of the 3D generator.
-- `[ ]` Keep depths 2 through 5 generator-derived and render-only.
-- `[ ]` Make the backwall editable and persistent without creating colliders.
-- `[ ]` Connect authoritative backwall mutations to the existing six-depth
+- `[x]` Store foreground and backwall as independent dense chunk layers.
+- `[x]` Initialize both layers from depths 0 and 1 of the 3D generator.
+- `[x]` Keep depths 2 through 5 generator-derived and render-only.
+- `[x]` Make the backwall editable and persistent without creating colliders.
+- `[x]` Connect authoritative backwall mutations to the existing six-depth
   light volume and depth-aware material presentation.
-- `[ ]` Default interaction to foreground; use `Tab` to select backwall and
+- `[x]` Default interaction to foreground; use `Tab` to select backwall and
   show the active layer in the HUD.
-- `[ ]` Test overlapping foreground/backwall blocks, negative coordinates,
+- `[x]` Test overlapping foreground/backwall blocks, negative coordinates,
   chunk edges, unload/reload, and save/reload.
 
 ### M2.2 Streaming
@@ -139,11 +140,11 @@ local gates pass.
   cancelled results before commit.
 - `[ ]` Preserve deterministic generation regardless of task completion order.
 
-### M2.3 SCW schema 5
+### M2.3 SCW schema 6
 
 - `[ ]` Replace current save structs with one current-schema representation;
   do not keep version-suffixed legacy Rust types.
-- `[ ]` Require `SCW1` plus exact `schema_version = 5`.
+- `[ ]` Require `SCW1` plus exact `schema_version = 6`.
 - `[ ]` Encode metadata, palettes, region references, and pending ticks with
   Postcard, then compress SCW payloads with Zstandard.
 - `[ ]` Reserve dense code 0 for air and codes 1–255 for the per-region

@@ -47,7 +47,7 @@ application/
     snapshot, repository port, session, streaming, world state, saving
 adapters/
     bevy/       ECS and presentation integrations
-    storage/    schema-4 SCW package repository
+    storage/    schema-5 SCW package repository
 crates/
     sidecraft-textures/
                 Bevy-free texture-pack format, generator, validator, and CLI
@@ -55,7 +55,7 @@ lib.rs          composition root and schedule ordering
 ```
 
 Domain snapshots are schema-neutral and world IDs are path-free. The storage
-adapter maps those values to the current schema-4 package layout. The Bevy
+adapter maps those values to the current schema-5 package layout. The Bevy
 adapter uses thin resource wrappers because Bevy resources must implement its
 ECS component contract; the wrapped domain and application types remain
 framework-independent.
@@ -306,15 +306,15 @@ Only the current SCW schema is accepted. A structural change bumps
 `schema_version`, deletes the previous reader and tests, and intentionally
 invalidates existing prototype worlds.
 
-The current schema is exactly version 4:
+The current schema is exactly version 5:
 
 - Every file begins with an `SCW1` envelope.
 - Postcard encodes metadata, palettes, and region references.
 - Zstandard compresses each payload.
 - Palette value `0` means air. Values `1..=255` index at most 255 non-air
   `BlockState` entries.
-- Each saved chunk has one dense row-major, one-byte-per-block foreground
-  array.
+- Each saved chunk has independent dense row-major, one-byte-per-block
+  foreground and backwall arrays.
 - Region files are immutable and content-addressed. Unchanged references are
   reused, and the schema version is a domain separator in every region hash.
 - Region files are flushed and synced before an atomically replaced manifest
@@ -324,9 +324,9 @@ The current schema is exactly version 4:
 - The manifest stores seed, generator version, world dimensions, player state,
   absolute day ticks, and sorted region references.
 
-M2 replaces this prototype layout with exact schema version 5, adding the
-persistent backwall, `world_tick`, the next tick sequence, and region-local
-pending scheduled ticks. Schema 4 will be invalidated rather than migrated.
+M2.3 replaces this prototype layout with exact schema version 6, adding
+`world_tick`, the next tick sequence, and region-local pending scheduled ticks.
+Schema 5 will be invalidated rather than migrated.
 
 Magic, schema, framing, decompression, palette, dimensions, ordering, checksum,
 and runtime fields are validated before data enters the domain. Invalid or

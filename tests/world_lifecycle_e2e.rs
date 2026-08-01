@@ -5,8 +5,8 @@ use sidecraft::{
         WorldRepository, WorldState, blank_snapshot, break_block, place_block, validate_snapshot,
     },
     domain::{
-        BlockState, ChunkLayer, DEPTH_SLICES, DayCycle, LightVolume, VoxelPos, WORLD_HEIGHT,
-        generated_voxel, spawn_for_seed, surface_height, world_to_chunk,
+        BlockState, ChunkLayer, DEPTH_SLICES, DayCycle, LightVolume, VoxelLayer, VoxelPos,
+        WORLD_HEIGHT, generated_voxel, spawn_for_seed, surface_height, world_to_chunk,
     },
 };
 
@@ -36,6 +36,18 @@ fn new_world_edit_save_and_reload_lifecycle() {
             .report
             .is_empty()
     );
+    let overlap_y = (1..WORLD_HEIGHT)
+        .find(|y| {
+            generated_voxel(seed, 0, *y, 0).is_some_and(BlockState::breakable)
+                && generated_voxel(seed, 0, *y, 1).is_some_and(BlockState::breakable)
+        })
+        .unwrap();
+    let overlapping_foreground = VoxelPos::foreground(0, overlap_y);
+    let overlapping_backwall = VoxelPos::backwall(0, overlap_y);
+    break_block(&mut world, overlapping_foreground).unwrap();
+    break_block(&mut world, overlapping_backwall).unwrap();
+    place_block(&mut world, overlapping_foreground, BlockState::WOOD).unwrap();
+    place_block(&mut world, overlapping_backwall, BlockState::DIRT).unwrap();
 
     let mut updated = loaded;
     updated.day_time_ticks = 123_456_789;
@@ -50,6 +62,14 @@ fn new_world_edit_save_and_reload_lifecycle() {
     let reconstructed = WorldState::from_snapshot(&reloaded).state;
     assert_eq!(reconstructed.view().block(surface), None);
     assert_eq!(reconstructed.view().block(placed), Some(BlockState::WOOD));
+    assert_eq!(
+        reconstructed.view().block(overlapping_foreground),
+        Some(BlockState::WOOD)
+    );
+    assert_eq!(
+        reconstructed.view().block(overlapping_backwall),
+        Some(BlockState::DIRT)
+    );
     assert_eq!(reloaded.player.selected_slot, 6);
     assert_eq!(
         Vec2::new(reloaded.player.local_x, reloaded.player.y),
@@ -59,8 +79,10 @@ fn new_world_edit_save_and_reload_lifecycle() {
     let view = reconstructed.view();
     let (min_x, max_x) = view.loaded_x_bounds().unwrap();
     let light = LightVolume::calculate(min_x, max_x, WORLD_HEIGHT, DEPTH_SLICES, |x, y, depth| {
-        if depth == 0 && view.contains_chunk(ChunkLayer::foreground(world_to_chunk(x))) {
-            view.block(VoxelPos::foreground(x, y))
+        if let Some(layer) = VoxelLayer::from_persistent_depth(depth)
+            && view.contains_chunk(ChunkLayer::new(world_to_chunk(x), layer))
+        {
+            view.block(VoxelPos::new(x, y, layer))
         } else {
             generated_voxel(seed, x, y, depth)
         }

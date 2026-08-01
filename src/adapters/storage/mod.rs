@@ -19,10 +19,10 @@ const CHUNK_AREA: usize = (CHUNK_WIDTH * WORLD_HEIGHT) as usize;
 const MAX_SAVED_CHUNKS_PER_FILE: usize = 65_536;
 const REGION_CHUNKS: i64 = 64;
 const MANIFEST_FILE: &str = "manifest.scw";
-const SAVE_SCHEMA_VERSION: u32 = 4;
+const SAVE_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct ScwMetadataV1 {
+struct ScwMetadata {
     schema_version: u32,
     generator_version: u32,
     height: i32,
@@ -38,8 +38,8 @@ struct ScwMetadataV1 {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct ScwHeaderV1 {
-    metadata: ScwMetadataV1,
+struct ScwHeader {
+    metadata: ScwMetadata,
     palette: Vec<ScwPaletteBlock>,
     chunk_xs: Vec<i64>,
 }
@@ -65,14 +65,14 @@ impl ScwPaletteBlock {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct ScwPackageManifestV1 {
-    metadata: ScwMetadataV1,
+struct ScwPackageManifest {
+    metadata: ScwMetadata,
     generation: u64,
-    regions: Vec<ScwRegionRefV1>,
+    regions: Vec<ScwRegionRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct ScwRegionRefV1 {
+struct ScwRegionRef {
     region_x: i64,
     content_hash: u64,
     file_name: String,
@@ -290,14 +290,14 @@ fn save_package(path: &Path, save: &WorldSnapshot) -> Result<(), StoreError> {
             };
             atomic_write(path, &region_path, &encode_scw(&region_save)?)?;
         }
-        regions.push(ScwRegionRefV1 {
+        regions.push(ScwRegionRef {
             region_x,
             content_hash,
             file_name,
         });
     }
 
-    let manifest = ScwPackageManifestV1 {
+    let manifest = ScwPackageManifest {
         metadata: metadata_from_save(save),
         generation,
         regions,
@@ -310,7 +310,12 @@ fn save_package(path: &Path, save: &WorldSnapshot) -> Result<(), StoreError> {
 
 fn load_package(path: &Path) -> Result<WorldSnapshot, StoreError> {
     let manifest_bytes = fs::read(path.join(MANIFEST_FILE))?;
-    let manifest: ScwPackageManifestV1 = decode_postcard_envelope(&manifest_bytes)?;
+    let manifest: ScwPackageManifest = decode_postcard_envelope(&manifest_bytes)?;
+    if manifest.metadata.schema_version != SAVE_SCHEMA_VERSION {
+        return Err(StoreError::UnsupportedSchema(
+            manifest.metadata.schema_version,
+        ));
+    }
     validate_manifest(&manifest)?;
     let mut chunks = Vec::new();
     for region in &manifest.regions {
@@ -346,7 +351,7 @@ fn load_package(path: &Path) -> Result<WorldSnapshot, StoreError> {
     Ok(save)
 }
 
-fn validate_manifest(manifest: &ScwPackageManifestV1) -> Result<(), StoreError> {
+fn validate_manifest(manifest: &ScwPackageManifest) -> Result<(), StoreError> {
     if manifest
         .regions
         .windows(2)
@@ -385,7 +390,8 @@ fn hash_region_for_schema(chunks: &[ChunkSnapshot], schema_version: u32) -> u64 
             .x
             .to_le_bytes()
             .into_iter()
-            .chain(chunk.blocks.iter().copied())
+            .chain(chunk.foreground.iter().copied())
+            .chain(chunk.backwall.iter().copied())
         {
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x100000001b3);
@@ -394,17 +400,14 @@ fn hash_region_for_schema(chunks: &[ChunkSnapshot], schema_version: u32) -> u64 
     hash
 }
 
-fn region_metadata_matches(region: &WorldSnapshot, metadata: &ScwMetadataV1) -> bool {
+fn region_metadata_matches(region: &WorldSnapshot, metadata: &ScwMetadata) -> bool {
     region.generator_version == metadata.generator_version
         && region.height == metadata.height
         && region.seed == metadata.seed
         && region.created_at_unix_s == metadata.created_at_unix_s
 }
 
-fn cleanup_obsolete_regions(
-    path: &Path,
-    manifest: &ScwPackageManifestV1,
-) -> Result<(), StoreError> {
+fn cleanup_obsolete_regions(path: &Path, manifest: &ScwPackageManifest) -> Result<(), StoreError> {
     let active = manifest
         .regions
         .iter()
@@ -544,7 +547,7 @@ fn decode_scw(file: &[u8]) -> Result<WorldSnapshot, StoreError> {
     let Some(encoded_header) = decoded.get(4..header_end) else {
         return Err(StoreError::Format("metadata is truncated".into()));
     };
-    let (header, remaining): (ScwHeaderV1, &[u8]) =
+    let (header, remaining): (ScwHeader, &[u8]) =
         postcard::take_from_bytes(encoded_header).map_err(StoreError::Postcard)?;
     if !remaining.is_empty() {
         return Err(StoreError::Format("metadata contains trailing data".into()));
@@ -552,12 +555,12 @@ fn decode_scw(file: &[u8]) -> Result<WorldSnapshot, StoreError> {
     save_from_parts(header, decoded[header_end..].to_vec())
 }
 
-fn parts_from_save(save: &WorldSnapshot) -> Result<(ScwHeaderV1, Vec<u8>), StoreError> {
+fn parts_from_save(save: &WorldSnapshot) -> Result<(ScwHeader, Vec<u8>), StoreError> {
     validate(save)?;
     let palette = save
         .chunks
         .iter()
-        .flat_map(|chunk| chunk.blocks.iter().copied())
+        .flat_map(|chunk| chunk.foreground.iter().chain(&chunk.backwall).copied())
         .filter_map(ScwPaletteBlock::from_code)
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -568,31 +571,40 @@ fn parts_from_save(save: &WorldSnapshot) -> Result<(ScwHeaderV1, Vec<u8>), Store
         ));
     }
 
-    let mut blocks = Vec::with_capacity(save.chunks.len() * CHUNK_AREA);
+    let capacity = save
+        .chunks
+        .len()
+        .checked_mul(CHUNK_AREA)
+        .and_then(|size| size.checked_mul(2))
+        .ok_or_else(|| StoreError::Format("dense chunk data length overflowed".into()))?;
+    let mut blocks = Vec::with_capacity(capacity);
     for chunk in &save.chunks {
-        for code in &chunk.blocks {
-            let palette_code = match ScwPaletteBlock::from_code(*code) {
-                None if *code == 0 => 0,
-                Some(kind) => {
-                    let palette_index = palette
-                        .binary_search(&kind)
-                        .expect("every chunk block kind was collected into the palette");
-                    u8::try_from(palette_index + 1)
-                        .map_err(|_| StoreError::Format("block palette index overflowed".into()))?
-                }
-                None => {
-                    return Err(StoreError::Validation(format!(
-                        "chunk {} contains invalid block code {code}",
-                        chunk.x
-                    )));
-                }
-            };
-            blocks.push(palette_code);
+        for layer in [&chunk.foreground, &chunk.backwall] {
+            for code in layer {
+                let palette_code = match ScwPaletteBlock::from_code(*code) {
+                    None if *code == 0 => 0,
+                    Some(kind) => {
+                        let palette_index = palette
+                            .binary_search(&kind)
+                            .expect("every chunk block kind was collected into the palette");
+                        u8::try_from(palette_index + 1).map_err(|_| {
+                            StoreError::Format("block palette index overflowed".into())
+                        })?
+                    }
+                    None => {
+                        return Err(StoreError::Validation(format!(
+                            "chunk {} contains invalid block code {code}",
+                            chunk.x
+                        )));
+                    }
+                };
+                blocks.push(palette_code);
+            }
         }
     }
 
     Ok((
-        ScwHeaderV1 {
+        ScwHeader {
             metadata: metadata_from_save(save),
             palette,
             chunk_xs: save.chunks.iter().map(|chunk| chunk.x).collect(),
@@ -601,10 +613,7 @@ fn parts_from_save(save: &WorldSnapshot) -> Result<(ScwHeaderV1, Vec<u8>), Store
     ))
 }
 
-fn save_from_parts(
-    header: ScwHeaderV1,
-    dense_blocks: Vec<u8>,
-) -> Result<WorldSnapshot, StoreError> {
+fn save_from_parts(header: ScwHeader, dense_blocks: Vec<u8>) -> Result<WorldSnapshot, StoreError> {
     if header.metadata.height != WORLD_HEIGHT {
         return Err(StoreError::Format(format!(
             "expected chunk height {WORLD_HEIGHT}"
@@ -628,6 +637,7 @@ fn save_from_parts(
         .chunk_xs
         .len()
         .checked_mul(CHUNK_AREA)
+        .and_then(|size| size.checked_mul(2))
         .ok_or_else(|| StoreError::Format("dense chunk data length overflowed".into()))?;
     if dense_blocks.len() != expected_blocks {
         return Err(StoreError::Format(format!(
@@ -641,29 +651,37 @@ fn save_from_parts(
         .chunk_xs
         .iter()
         .copied()
-        .zip(dense_blocks.chunks_exact(CHUNK_AREA))
+        .zip(dense_blocks.chunks_exact(CHUNK_AREA * 2))
     {
-        let mut blocks = Vec::with_capacity(CHUNK_AREA);
-        for palette_code in encoded_chunk {
-            let code = if *palette_code == 0 {
-                0
-            } else {
-                let palette_index = usize::from(*palette_code - 1);
-                let Some(kind) = header.palette.get(palette_index).copied() else {
-                    return Err(StoreError::Format(format!(
-                        "dense block entry references missing palette index {palette_code}"
-                    )));
+        let decode_layer = |encoded: &[u8]| -> Result<Vec<u8>, StoreError> {
+            let mut blocks = Vec::with_capacity(CHUNK_AREA);
+            for palette_code in encoded {
+                let code = if *palette_code == 0 {
+                    0
+                } else {
+                    let palette_index = usize::from(*palette_code - 1);
+                    let Some(kind) = header.palette.get(palette_index).copied() else {
+                        return Err(StoreError::Format(format!(
+                            "dense block entry references missing palette index {palette_code}"
+                        )));
+                    };
+                    kind.code().ok_or_else(|| {
+                        StoreError::Format(format!(
+                            "palette entry contains invalid block state {}:{}",
+                            kind.id, kind.variant
+                        ))
+                    })?
                 };
-                kind.code().ok_or_else(|| {
-                    StoreError::Format(format!(
-                        "palette entry contains invalid block state {}:{}",
-                        kind.id, kind.variant
-                    ))
-                })?
-            };
-            blocks.push(code);
-        }
-        chunks.push(ChunkSnapshot { x: chunk_x, blocks });
+                blocks.push(code);
+            }
+            Ok(blocks)
+        };
+        let (foreground, backwall) = encoded_chunk.split_at(CHUNK_AREA);
+        chunks.push(ChunkSnapshot {
+            x: chunk_x,
+            foreground: decode_layer(foreground)?,
+            backwall: decode_layer(backwall)?,
+        });
     }
 
     let save = save_from_metadata(header.metadata, chunks)?;
@@ -671,8 +689,8 @@ fn save_from_parts(
     Ok(save)
 }
 
-fn metadata_from_save(save: &WorldSnapshot) -> ScwMetadataV1 {
-    ScwMetadataV1 {
+fn metadata_from_save(save: &WorldSnapshot) -> ScwMetadata {
+    ScwMetadata {
         schema_version: SAVE_SCHEMA_VERSION,
         generator_version: save.generator_version,
         height: save.height,
@@ -689,7 +707,7 @@ fn metadata_from_save(save: &WorldSnapshot) -> ScwMetadataV1 {
 }
 
 fn save_from_metadata(
-    metadata: ScwMetadataV1,
+    metadata: ScwMetadata,
     chunks: Vec<ChunkSnapshot>,
 ) -> Result<WorldSnapshot, StoreError> {
     if metadata.schema_version != SAVE_SCHEMA_VERSION {
@@ -729,14 +747,20 @@ mod tests {
     use tempfile::tempdir;
 
     fn example_save() -> WorldSnapshot {
-        let mut blocks = vec![0; CHUNK_AREA];
-        blocks[0] = BlockState::BEDROCK.code();
-        blocks[1] = BlockState::BEDROCK.code();
-        blocks[(2 * CHUNK_WIDTH + 3) as usize] = BlockState::TORCH.code();
+        let mut foreground = vec![0; CHUNK_AREA];
+        foreground[0] = BlockState::BEDROCK.code();
+        foreground[1] = BlockState::BEDROCK.code();
+        foreground[(2 * CHUNK_WIDTH + 3) as usize] = BlockState::TORCH.code();
+        let mut backwall = vec![0; CHUNK_AREA];
+        backwall[4] = BlockState::STONE.code();
         blank_snapshot(
             7,
             "Example".into(),
-            vec![ChunkSnapshot { x: 0, blocks }],
+            vec![ChunkSnapshot {
+                x: 0,
+                foreground,
+                backwall,
+            }],
             Vec2::new(2.5, 4.0),
             10,
         )
@@ -768,18 +792,19 @@ mod tests {
     }
 
     #[test]
-    fn payload_uses_a_dense_byte_array_and_palette() {
+    fn payload_uses_two_dense_arrays_and_one_palette() {
         let (header, blocks) = parts_from_save(&example_save()).unwrap();
-        assert_eq!(blocks.len(), CHUNK_AREA);
-        assert_eq!(
-            header.palette,
-            vec![
-                ScwPaletteBlock::from_code(BlockState::TORCH.code()).unwrap(),
-                ScwPaletteBlock::from_code(BlockState::BEDROCK.code()).unwrap(),
-            ]
-        );
-        assert_eq!(blocks[0], 2);
-        assert_eq!(blocks[(2 * CHUNK_WIDTH + 3) as usize], 1);
+        assert_eq!(blocks.len(), CHUNK_AREA * 2);
+        let mut expected = vec![
+            ScwPaletteBlock::from_code(BlockState::TORCH.code()).unwrap(),
+            ScwPaletteBlock::from_code(BlockState::STONE.code()).unwrap(),
+            ScwPaletteBlock::from_code(BlockState::BEDROCK.code()).unwrap(),
+        ];
+        expected.sort();
+        assert_eq!(header.palette, expected);
+        assert_ne!(blocks[0], 0);
+        assert_ne!(blocks[(2 * CHUNK_WIDTH + 3) as usize], 0);
+        assert_ne!(blocks[CHUNK_AREA + 4], 0);
     }
 
     #[test]
@@ -840,19 +865,21 @@ mod tests {
         let directory = tempdir().unwrap();
         let store = ScwRepository::new(directory.path());
         let mut save = example_save();
-        let blocks = save.chunks[0].blocks.clone();
+        let foreground = save.chunks[0].foreground.clone();
+        let backwall = save.chunks[0].backwall.clone();
         save.chunks = [-65, -1, 0, 64]
             .into_iter()
             .map(|x| ChunkSnapshot {
                 x,
-                blocks: blocks.clone(),
+                foreground: foreground.clone(),
+                backwall: backwall.clone(),
             })
             .collect();
         let id = WorldId::new("package").unwrap();
         let package_path = store.path_for(&id);
         WorldRepository::save(&store, &id, &save).unwrap();
         assert_eq!(WorldRepository::load(&store, &id).unwrap(), save);
-        let manifest: ScwPackageManifestV1 =
+        let manifest: ScwPackageManifest =
             decode_postcard_envelope(&fs::read(package_path.join(MANIFEST_FILE)).unwrap()).unwrap();
         assert_eq!(
             manifest
@@ -911,19 +938,49 @@ mod tests {
     }
 
     #[test]
-    fn schema_four_is_exact_and_older_metadata_is_rejected() {
+    fn schema_five_is_exact_and_schema_four_is_rejected() {
         let save = blank_snapshot(1, "World".into(), Vec::new(), spawn_for_seed(1), 1);
         let mut metadata = metadata_from_save(&save);
-        assert_eq!(metadata.schema_version, 4);
-        metadata.schema_version = 3;
+        assert_eq!(metadata.schema_version, 5);
+        metadata.schema_version = 4;
         assert!(matches!(
             save_from_metadata(metadata, Vec::new()),
-            Err(StoreError::UnsupportedSchema(3))
+            Err(StoreError::UnsupportedSchema(4))
         ));
     }
 
     #[test]
-    fn schema_four_palette_entries_encode_ids_and_variants() {
+    fn package_rejects_schema_four_before_reading_regions() {
+        let directory = tempdir().unwrap();
+        let store = ScwRepository::new(directory.path());
+        let id = WorldId::new("old-schema").unwrap();
+        let package = store.path_for(&id);
+        fs::create_dir_all(&package).unwrap();
+        let mut metadata = metadata_from_save(&example_save());
+        metadata.schema_version = 4;
+        let manifest = ScwPackageManifest {
+            metadata,
+            generation: 1,
+            regions: vec![ScwRegionRef {
+                region_x: 0,
+                content_hash: 0,
+                file_name: "region-0-0000000000000000.scw".into(),
+            }],
+        };
+        fs::write(
+            package.join(MANIFEST_FILE),
+            encode_postcard_envelope(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            WorldRepository::load(&store, &id),
+            Err(RepositoryError::UnsupportedSchema(4))
+        ));
+    }
+
+    #[test]
+    fn schema_five_palette_entries_encode_ids_and_variants() {
         let grass = ScwPaletteBlock::from_code(BlockState::GRASS.code()).unwrap();
         let torch = ScwPaletteBlock::from_code(BlockState::TORCH.code()).unwrap();
         let wall_torch = ScwPaletteBlock::from_code(BlockState::WALL_TORCH_LEFT.code()).unwrap();
@@ -936,8 +993,8 @@ mod tests {
     fn region_hash_is_separated_by_schema() {
         let chunks = example_save().chunks;
         assert_ne!(
-            hash_region_for_schema(&chunks, 3),
-            hash_region_for_schema(&chunks, 4)
+            hash_region_for_schema(&chunks, 4),
+            hash_region_for_schema(&chunks, 5)
         );
     }
 }

@@ -11,8 +11,10 @@ fn calculate_light(seed: u64, grid: &BlockGrid) -> LightVolume {
     let view = grid.view();
     let (min_x, max_x) = view.loaded_x_bounds().unwrap();
     LightVolume::calculate(min_x, max_x, WORLD_HEIGHT, DEPTH_SLICES, |x, y, depth| {
-        if depth == 0 && view.contains_chunk(ChunkLayer::foreground(world_to_chunk(x))) {
-            view.block(VoxelPos::foreground(x, y))
+        if let Some(layer) = sidecraft::domain::VoxelLayer::from_persistent_depth(depth)
+            && view.contains_chunk(ChunkLayer::new(world_to_chunk(x), layer))
+        {
+            view.block(VoxelPos::new(x, y, layer))
         } else {
             generated_voxel(seed, x, y, depth)
         }
@@ -34,7 +36,12 @@ fn persisted_chunks_reconstruct_the_same_light_field() {
             .iter()
             .map(|chunk| ChunkSnapshot {
                 x: chunk.x(),
-                blocks: chunk.blocks().to_vec(),
+                foreground: chunk
+                    .blocks(sidecraft::domain::VoxelLayer::Foreground)
+                    .to_vec(),
+                backwall: chunk
+                    .blocks(sidecraft::domain::VoxelLayer::Backwall)
+                    .to_vec(),
             })
             .collect(),
         spawn_for_seed(41),
@@ -42,8 +49,9 @@ fn persisted_chunks_reconstruct_the_same_light_field() {
     );
     let mut reconstructed = BlockGrid::new(WORLD_HEIGHT);
     for chunk in save.chunks {
-        WorldMutator::new(&mut reconstructed)
-            .integrate_chunk(BlockChunk::from_dense(chunk.x, chunk.blocks).unwrap());
+        WorldMutator::new(&mut reconstructed).integrate_chunk(
+            BlockChunk::from_dense(chunk.x, chunk.foreground, chunk.backwall).unwrap(),
+        );
     }
     let after = calculate_light(41, &reconstructed);
 

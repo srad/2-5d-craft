@@ -9,8 +9,8 @@ use crate::{
     },
     domain::{
         BlockId, BlockState, CHUNK_WIDTH, ChunkLayer, DEPTH_SLICES, LightCell, LightVolume,
-        MAX_LIGHT_LEVEL, TorchMount, VoxelPos, WORLD_HEIGHT, WorldView, generated_voxel,
-        stable_hash, world_to_chunk,
+        MAX_LIGHT_LEVEL, TorchMount, VoxelLayer, VoxelPos, WORLD_HEIGHT, WorldView,
+        generated_voxel, stable_hash, world_to_chunk,
     },
 };
 use avian2d::prelude::*;
@@ -88,6 +88,8 @@ pub struct TorchMaterial {
     atlas: Handle<Image>,
     #[uniform(2)]
     effects: Vec4,
+    #[uniform(3)]
+    haze_color: LinearRgba,
 }
 
 impl Material for TorchMaterial {
@@ -229,6 +231,7 @@ fn build_catalog(
     let emissive_material = torch_materials.add(TorchMaterial {
         atlas: atlas.clone(),
         effects: Vec4::new(1.0, 0.0, 0.0, 0.0),
+        haze_color,
     });
     let player_cube = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
     let player_colors = player_colors(texture_packs.active.player);
@@ -281,6 +284,7 @@ fn update_voxel_lightmap(
     mut lightmap: Option<ResMut<VoxelLightmap>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<VoxelMaterial>>,
+    mut torch_materials: ResMut<Assets<TorchMaterial>>,
     flicker: Res<TorchFlicker>,
 ) {
     let (Some(catalog), Some(lightmap)) = (catalog, lightmap.as_mut()) else {
@@ -301,6 +305,9 @@ fn update_voxel_lightmap(
         if let Some(mut material) = materials.get_mut(handle) {
             material.haze_color = haze_color;
         }
+    }
+    if let Some(mut material) = torch_materials.get_mut(&catalog.emissive_material) {
+        material.haze_color = haze_color;
     }
     lightmap.colors = colors;
 }
@@ -494,10 +501,13 @@ pub fn build_chunk_meshes(
         if !(0..WORLD_HEIGHT).contains(&y) || !(0..i32::from(DEPTH_SLICES)).contains(&depth) {
             return None;
         }
-        if depth == 0 && view.contains_chunk(ChunkLayer::foreground(world_to_chunk(global_x))) {
-            view.block(VoxelPos::foreground(global_x, y))
+        let depth = depth as u8;
+        if let Some(layer) = VoxelLayer::from_persistent_depth(depth)
+            && view.contains_chunk(ChunkLayer::new(world_to_chunk(global_x), layer))
+        {
+            view.block(VoxelPos::new(global_x, y, layer))
         } else {
-            generated_voxel(seed, global_x, y, depth as u8)
+            generated_voxel(seed, global_x, y, depth)
         }
     };
     build_voxel_scene_meshes(
@@ -538,9 +548,7 @@ pub(crate) fn build_voxel_scene_meshes(
                     u64::from(state.id().value()) + u64::from(depth) * 97,
                 ) % u64::from(ATLAS_VARIANTS)) as u32;
                 if let Some(mount) = state.torch_mount() {
-                    if depth == 0 {
-                        emissive.push_torch(local_x as f32, y as f32, variant, mount);
-                    }
+                    emissive.push_torch(local_x as f32, y as f32, depth, variant, mount);
                     continue;
                 }
                 let builder = if state == BlockState::LEAVES {
@@ -877,7 +885,7 @@ struct TorchMeshBuilder {
 }
 
 impl TorchMeshBuilder {
-    fn push_torch(&mut self, x: f32, y: f32, variant: u32, mount: TorchMount) {
+    fn push_torch(&mut self, x: f32, y: f32, depth: u8, variant: u32, mount: TorchMount) {
         let tile = ((u32::from(BlockState::TORCH.id().value()) - 1) * FACE_VARIANTS)
             * ATLAS_VARIANTS
             + variant;
@@ -904,14 +912,15 @@ impl TorchMeshBuilder {
         let lower_right = base - perpendicular;
         let upper_left = top + perpendicular;
         let upper_right = top - perpendicular;
-        let front = 0.1225;
-        let back = -0.0025;
+        let depth_offset = -f32::from(depth);
+        let front = depth_offset + 0.1225;
+        let back = depth_offset - 0.0025;
         let side_uvs = tile_uvs(tile);
         let vertical_data = [
-            [0.0, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0, 0.0],
+            [0.0, f32::from(depth), 0.0, 0.0],
+            [0.0, f32::from(depth), 0.0, 0.0],
+            [1.0, f32::from(depth), 0.0, 0.0],
+            [1.0, f32::from(depth), 0.0, 0.0],
         ];
 
         self.push_quad(
@@ -962,7 +971,7 @@ impl TorchMeshBuilder {
                 [upper_left.x, upper_left.y, back],
             ],
             tile_region_uvs(tile, 0, 4),
-            [[1.0, 0.0, 0.0, 0.0]; 4],
+            [[1.0, f32::from(depth), 0.0, 0.0]; 4],
         );
     }
 
@@ -1528,7 +1537,12 @@ mod tests {
     fn empty_grid() -> BlockGrid {
         let mut grid = BlockGrid::new(WORLD_HEIGHT);
         WorldMutator::new(&mut grid).integrate_chunk(
-            BlockChunk::from_dense(0, vec![0; (CHUNK_WIDTH * WORLD_HEIGHT) as usize]).unwrap(),
+            BlockChunk::from_dense(
+                0,
+                vec![0; (CHUNK_WIDTH * WORLD_HEIGHT) as usize],
+                vec![0; (CHUNK_WIDTH * WORLD_HEIGHT) as usize],
+            )
+            .unwrap(),
         );
         grid
     }
@@ -1725,10 +1739,10 @@ mod tests {
     #[test]
     fn torch_mesh_is_a_compact_cuboid_with_an_emissive_cap() {
         let mut first = TorchMeshBuilder::default();
-        first.push_torch(2.0, 3.0, 0, TorchMount::Floor);
+        first.push_torch(2.0, 3.0, 0, 0, TorchMount::Floor);
         let first = first.finish();
         let mut second = TorchMeshBuilder::default();
-        second.push_torch(2.0, 3.0, 0, TorchMount::Floor);
+        second.push_torch(2.0, 3.0, 0, 0, TorchMount::Floor);
         let second = second.finish();
 
         assert_eq!(first.count_vertices(), 20);
@@ -1751,10 +1765,10 @@ mod tests {
     #[test]
     fn wall_torch_meshes_are_mirrored_and_lean_away_from_support() {
         let mut left = TorchMeshBuilder::default();
-        left.push_torch(0.0, 0.0, 0, TorchMount::WallLeft);
+        left.push_torch(0.0, 0.0, 0, 0, TorchMount::WallLeft);
         let left = left.finish();
         let mut right = TorchMeshBuilder::default();
-        right.push_torch(0.0, 0.0, 0, TorchMount::WallRight);
+        right.push_torch(0.0, 0.0, 0, 0, TorchMount::WallRight);
         let right = right.finish();
         let left_positions = left
             .attribute(Mesh::ATTRIBUTE_POSITION)
@@ -1800,6 +1814,7 @@ mod tests {
             (VoxelPos::foreground(0, 0), BlockState::BEDROCK),
             (VoxelPos::foreground(1, 1), BlockState::LEAVES),
             (VoxelPos::foreground(2, 1), BlockState::TORCH),
+            (VoxelPos::backwall(3, 1), BlockState::TORCH),
         ];
         let proposals = writes
             .into_iter()
@@ -1821,8 +1836,10 @@ mod tests {
         WorldMutator::new(&mut grid).commit_batch(proposals);
         let view = grid.view();
         let light = LightVolume::calculate(-15, 47, WORLD_HEIGHT, DEPTH_SLICES, |x, y, depth| {
-            if depth == 0 && view.contains_chunk(ChunkLayer::foreground(world_to_chunk(x))) {
-                view.block(VoxelPos::foreground(x, y))
+            if let Some(layer) = VoxelLayer::from_persistent_depth(depth)
+                && view.contains_chunk(ChunkLayer::new(world_to_chunk(x), layer))
+            {
+                view.block(VoxelPos::new(x, y, layer))
             } else {
                 generated_voxel(7, x, y, depth)
             }
@@ -1837,6 +1854,30 @@ mod tests {
         assert!(positions.iter().any(|position| position[2] <= -4.5));
         assert!(built.cutout.count_vertices() > 0);
         assert!(built.emissive.count_vertices() > 0);
+        let torch_positions = built
+            .emissive
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .unwrap()
+            .as_float3()
+            .unwrap();
+        assert!(torch_positions.iter().any(|position| position[2] < -0.5));
         assert!(build_chunk_collider(&grid.view(), 0).is_some());
+
+        let mut backwall_only = empty_grid();
+        let position = VoxelPos::backwall(4, 4);
+        WorldMutator::new(&mut backwall_only).commit_batch(vec![MutationProposal {
+            preconditions: vec![BlockPrecondition {
+                position,
+                expected: None,
+            }],
+            writes: vec![BlockWrite {
+                position,
+                state: Some(BlockState::STONE),
+            }],
+            priority: MutationPriority::PLAYER,
+            source: position,
+            sequence: 0,
+        }]);
+        assert!(build_chunk_collider(&backwall_only.view(), 0).is_none());
     }
 }

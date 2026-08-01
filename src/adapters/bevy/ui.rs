@@ -4,12 +4,13 @@ use bevy::prelude::*;
 use crate::{
     AppState,
     adapters::bevy::{
+        interaction::ActiveVoxelLayer,
         player::{Hotbar, Player},
         rendering::RenderCatalog,
         session::SessionCommand,
     },
     application::WorldId,
-    domain::BlockState,
+    domain::{BlockState, VoxelLayer},
 };
 
 mod menus;
@@ -74,6 +75,9 @@ struct HotbarSlot(u8);
 #[derive(Component)]
 struct SelectedItemText;
 
+#[derive(Component)]
+struct ActiveLayerText;
+
 #[derive(Resource, Clone)]
 pub(super) struct UiFont(pub(super) FontSource);
 
@@ -106,6 +110,7 @@ impl Plugin for GameUiPlugin {
                     style_buttons,
                     update_status_text,
                     update_hotbar.run_if(in_state(AppState::Playing)),
+                    update_active_layer_text.run_if(in_state(AppState::Playing)),
                 ),
             );
         menus::register(app);
@@ -194,7 +199,12 @@ fn spawn_saving_screen(mut commands: Commands, ui_font: Res<UiFont>) {
         });
 }
 
-fn spawn_hud(mut commands: Commands, ui_font: Res<UiFont>, render_catalog: Res<RenderCatalog>) {
+fn spawn_hud(
+    mut commands: Commands,
+    ui_font: Res<UiFont>,
+    render_catalog: Res<RenderCatalog>,
+    active_layer: Res<ActiveVoxelLayer>,
+) {
     let font = ui_font.0.clone();
     commands
         .spawn((
@@ -217,6 +227,16 @@ fn spawn_hud(mut commands: Commands, ui_font: Res<UiFont>, render_catalog: Res<R
                 ..default()
             })
             .with_children(|column| {
+                column.spawn((
+                    Text::new(active_layer_label(active_layer.0)),
+                    TextFont {
+                        font: font.clone(),
+                        font_size: FontSize::Px(20.0),
+                        ..default()
+                    },
+                    TextColor(Color::WHITE),
+                    ActiveLayerText,
+                ));
                 column.spawn((
                     Text::new("Dirt"),
                     TextFont {
@@ -480,6 +500,25 @@ fn update_hotbar(
     }
 }
 
+fn update_active_layer_text(
+    active_layer: Res<ActiveVoxelLayer>,
+    mut labels: Query<&mut Text, With<ActiveLayerText>>,
+) {
+    if !active_layer.is_changed() {
+        return;
+    }
+    for mut label in &mut labels {
+        label.0 = active_layer_label(active_layer.0).into();
+    }
+}
+
+fn active_layer_label(layer: VoxelLayer) -> &'static str {
+    match layer {
+        VoxelLayer::Foreground => "Layer: Foreground [Tab]",
+        VoxelLayer::Backwall => "Layer: Backwall [Tab]",
+    }
+}
+
 fn pause_physics(mut physics_time: ResMut<Time<Physics>>) {
     physics_time.pause();
 }
@@ -512,5 +551,17 @@ mod tests {
         );
         assert!(UiAction::ApplyTexturePack.session_command().is_none());
         assert!(UiAction::ShowSettings.session_command().is_none());
+    }
+
+    #[test]
+    fn active_layer_labels_expose_the_tab_binding() {
+        assert_eq!(
+            active_layer_label(VoxelLayer::Foreground),
+            "Layer: Foreground [Tab]"
+        );
+        assert_eq!(
+            active_layer_label(VoxelLayer::Backwall),
+            "Layer: Backwall [Tab]"
+        );
     }
 }

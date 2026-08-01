@@ -2,10 +2,30 @@ use crate::domain::{BlockState, CHUNK_WIDTH};
 use glam::Vec2;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub enum VoxelLayer {
+    #[default]
     Foreground,
     Backwall,
+}
+
+impl VoxelLayer {
+    pub const ALL: [Self; 2] = [Self::Foreground, Self::Backwall];
+
+    pub const fn depth(self) -> u8 {
+        match self {
+            Self::Foreground => 0,
+            Self::Backwall => 1,
+        }
+    }
+
+    pub const fn from_persistent_depth(depth: u8) -> Option<Self> {
+        match depth {
+            0 => Some(Self::Foreground),
+            1 => Some(Self::Backwall),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
@@ -16,18 +36,21 @@ pub struct VoxelPos {
 }
 
 impl VoxelPos {
+    pub const fn new(global_x: i64, y: i32, layer: VoxelLayer) -> Self {
+        Self { global_x, y, layer }
+    }
+
     pub const fn foreground(global_x: i64, y: i32) -> Self {
-        Self {
-            global_x,
-            y,
-            layer: VoxelLayer::Foreground,
-        }
+        Self::new(global_x, y, VoxelLayer::Foreground)
+    }
+
+    pub const fn backwall(global_x: i64, y: i32) -> Self {
+        Self::new(global_x, y, VoxelLayer::Backwall)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VoxelCell {
-    LayerUnavailable,
     OutOfBounds,
     Unloaded,
     Air,
@@ -41,18 +64,24 @@ pub struct ChunkLayer {
 }
 
 impl ChunkLayer {
+    pub const fn new(chunk_x: i64, layer: VoxelLayer) -> Self {
+        Self { chunk_x, layer }
+    }
+
     pub const fn foreground(chunk_x: i64) -> Self {
-        Self {
-            chunk_x,
-            layer: VoxelLayer::Foreground,
-        }
+        Self::new(chunk_x, VoxelLayer::Foreground)
+    }
+
+    pub const fn backwall(chunk_x: i64) -> Self {
+        Self::new(chunk_x, VoxelLayer::Backwall)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockChunk {
     x: i64,
-    blocks: Vec<u8>,
+    foreground: Vec<u8>,
+    backwall: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,33 +184,46 @@ pub struct WorldMutator<'a> {
 }
 
 impl BlockChunk {
-    pub fn from_dense(chunk_x: i64, blocks: Vec<u8>) -> Option<Self> {
+    pub fn from_dense(chunk_x: i64, foreground: Vec<u8>, backwall: Vec<u8>) -> Option<Self> {
         let expected = (CHUNK_WIDTH * crate::domain::WORLD_HEIGHT) as usize;
         if !chunk_is_representable(chunk_x)
-            || blocks.len() != expected
-            || blocks
+            || foreground.len() != expected
+            || backwall.len() != expected
+            || foreground
                 .iter()
+                .chain(&backwall)
                 .any(|code| *code != 0 && BlockState::from_code(*code).is_none())
         {
             return None;
         }
-        Some(Self { x: chunk_x, blocks })
+        Some(Self {
+            x: chunk_x,
+            foreground,
+            backwall,
+        })
     }
 
     pub fn x(&self) -> i64 {
         self.x
     }
 
-    pub fn blocks(&self) -> &[u8] {
-        &self.blocks
+    pub fn blocks(&self, layer: VoxelLayer) -> &[u8] {
+        match layer {
+            VoxelLayer::Foreground => &self.foreground,
+            VoxelLayer::Backwall => &self.backwall,
+        }
     }
 
-    fn get(&self, local_x: i32, y: i32) -> Option<BlockState> {
-        BlockState::from_code(self.blocks[chunk_index(local_x, y)])
+    fn get(&self, local_x: i32, y: i32, layer: VoxelLayer) -> Option<BlockState> {
+        BlockState::from_code(self.blocks(layer)[chunk_index(local_x, y)])
     }
 
-    fn set(&mut self, local_x: i32, y: i32, state: Option<BlockState>) {
-        self.blocks[chunk_index(local_x, y)] = state.map_or(0, BlockState::code);
+    fn set(&mut self, local_x: i32, y: i32, layer: VoxelLayer, state: Option<BlockState>) {
+        let blocks = match layer {
+            VoxelLayer::Foreground => &mut self.foreground,
+            VoxelLayer::Backwall => &mut self.backwall,
+        };
+        blocks[chunk_index(local_x, y)] = state.map_or(0, BlockState::code);
     }
 }
 
@@ -211,11 +253,11 @@ impl BlockGrid {
         self.chunks
             .get_mut(&chunk_x)
             .expect("mutation targets are validated before commit")
-            .set(local_x, position.y, state);
+            .set(local_x, position.y, position.layer, state);
     }
 
-    pub(crate) fn chunk_snapshot(&self, chunk_x: i64) -> Option<Vec<u8>> {
-        self.chunks.get(&chunk_x).map(|chunk| chunk.blocks.clone())
+    pub(crate) fn chunk_snapshot(&self, chunk_x: i64) -> Option<BlockChunk> {
+        self.chunks.get(&chunk_x).cloned()
     }
 }
 
@@ -225,9 +267,6 @@ impl<'a> WorldView<'a> {
     }
 
     pub fn cell(&self, position: VoxelPos) -> VoxelCell {
-        if position.layer != VoxelLayer::Foreground {
-            return VoxelCell::LayerUnavailable;
-        }
         if !(0..self.grid.height).contains(&position.y) {
             return VoxelCell::OutOfBounds;
         }
@@ -236,7 +275,7 @@ impl<'a> WorldView<'a> {
             return VoxelCell::Unloaded;
         };
         let local_x = position.global_x.rem_euclid(i64::from(CHUNK_WIDTH)) as i32;
-        match chunk.get(local_x, position.y) {
+        match chunk.get(local_x, position.y, position.layer) {
             Some(state) => VoxelCell::Block(state),
             None => VoxelCell::Air,
         }
@@ -250,7 +289,7 @@ impl<'a> WorldView<'a> {
     }
 
     pub fn contains_chunk(&self, chunk: ChunkLayer) -> bool {
-        chunk.layer == VoxelLayer::Foreground && self.grid.chunks.contains_key(&chunk.chunk_x)
+        self.grid.chunks.contains_key(&chunk.chunk_x)
     }
 
     pub fn loaded_chunks(&self) -> impl Iterator<Item = i64> + '_ {
@@ -263,10 +302,13 @@ impl<'a> WorldView<'a> {
         Some((minimum, maximum))
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (VoxelPos, BlockState)> + '_ {
-        self.grid.chunks.values().flat_map(|chunk| {
+    pub fn iter_layer(
+        &self,
+        layer: VoxelLayer,
+    ) -> impl Iterator<Item = (VoxelPos, BlockState)> + '_ {
+        self.grid.chunks.values().flat_map(move |chunk| {
             chunk
-                .blocks
+                .blocks(layer)
                 .iter()
                 .enumerate()
                 .filter_map(move |(index, code)| {
@@ -274,9 +316,10 @@ impl<'a> WorldView<'a> {
                     let local_x = index as i32 % CHUNK_WIDTH;
                     let y = index as i32 / CHUNK_WIDTH;
                     Some((
-                        VoxelPos::foreground(
+                        VoxelPos::new(
                             chunk.x * i64::from(CHUNK_WIDTH) + i64::from(local_x),
                             y,
+                            layer,
                         ),
                         state,
                     ))
@@ -453,7 +496,10 @@ impl<'a> WorldMutator<'a> {
         let chunk_x = chunk.x;
         self.grid.insert_chunk(chunk);
         MutationReport {
-            chunk_changes: vec![ChunkChange::Integrated(ChunkLayer::foreground(chunk_x))],
+            chunk_changes: VoxelLayer::ALL
+                .into_iter()
+                .map(|layer| ChunkChange::Integrated(ChunkLayer::new(chunk_x, layer)))
+                .collect(),
             ..Default::default()
         }
     }
@@ -462,7 +508,10 @@ impl<'a> WorldMutator<'a> {
         let removed = self.grid.remove_chunk(chunk_x);
         let report = if removed.is_some() {
             MutationReport {
-                chunk_changes: vec![ChunkChange::Unloaded(ChunkLayer::foreground(chunk_x))],
+                chunk_changes: VoxelLayer::ALL
+                    .into_iter()
+                    .map(|layer| ChunkChange::Unloaded(ChunkLayer::new(chunk_x, layer)))
+                    .collect(),
                 ..Default::default()
             }
         } else {
@@ -492,7 +541,7 @@ fn cell_state(cell: VoxelCell) -> Option<Option<BlockState>> {
     match cell {
         VoxelCell::Air => Some(None),
         VoxelCell::Block(state) => Some(Some(state)),
-        VoxelCell::LayerUnavailable | VoxelCell::OutOfBounds | VoxelCell::Unloaded => None,
+        VoxelCell::OutOfBounds | VoxelCell::Unloaded => None,
     }
 }
 
@@ -519,7 +568,7 @@ fn duplicate_ordering_keys(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{WORLD_HEIGHT, generate_chunk};
+    use crate::domain::{WORLD_HEIGHT, generate_chunk, generated_voxel};
 
     fn loaded_grid() -> BlockGrid {
         let mut grid = BlockGrid::new(WORLD_HEIGHT);
@@ -550,7 +599,7 @@ mod tests {
     }
 
     #[test]
-    fn view_distinguishes_air_unloaded_bounds_and_layers() {
+    fn view_distinguishes_air_unloaded_bounds_and_persistent_layers() {
         let grid = loaded_grid();
         let view = grid.view();
         assert_eq!(view.cell(VoxelPos::foreground(-1, 70)), VoxelCell::Air);
@@ -562,13 +611,55 @@ mod tests {
             view.cell(VoxelPos::foreground(-1, WORLD_HEIGHT)),
             VoxelCell::OutOfBounds
         );
+        let backwall = VoxelPos::backwall(-1, 70);
         assert_eq!(
-            view.cell(VoxelPos {
-                global_x: -1,
-                y: 70,
-                layer: VoxelLayer::Backwall,
-            }),
-            VoxelCell::LayerUnavailable
+            view.cell(backwall),
+            generated_voxel(1, -1, 70, 1).map_or(VoxelCell::Air, VoxelCell::Block)
+        );
+    }
+
+    #[test]
+    fn foreground_and_backwall_mutate_independently_at_the_same_cell() {
+        let mut grid = loaded_grid();
+        let foreground = VoxelPos::foreground(-1, 70);
+        let backwall = VoxelPos::backwall(-1, 70);
+        let proposals = [
+            (foreground, BlockState::DIRT, 1),
+            (backwall, BlockState::STONE, 2),
+        ]
+        .into_iter()
+        .map(|(position, state, sequence)| MutationProposal {
+            preconditions: vec![BlockPrecondition {
+                position,
+                expected: grid.view().block(position),
+            }],
+            writes: vec![BlockWrite {
+                position,
+                state: Some(state),
+            }],
+            priority: MutationPriority::PLAYER,
+            source: position,
+            sequence,
+        })
+        .collect();
+
+        let result = WorldMutator::new(&mut grid).commit_batch(proposals);
+
+        assert_eq!(result.report.cell_changes.len(), 2);
+        assert_eq!(grid.view().block(foreground), Some(BlockState::DIRT));
+        assert_eq!(grid.view().block(backwall), Some(BlockState::STONE));
+    }
+
+    #[test]
+    fn chunk_lifecycle_reports_both_persistent_layers() {
+        let mut grid = BlockGrid::new(WORLD_HEIGHT);
+        let report = WorldMutator::new(&mut grid).integrate_chunk(generate_chunk(3, -2));
+        assert_eq!(
+            report.chunk_changes,
+            vec![
+                ChunkChange::Integrated(ChunkLayer::foreground(-2)),
+                ChunkChange::Integrated(ChunkLayer::backwall(-2)),
+            ]
         );
     }
 

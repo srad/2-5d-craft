@@ -124,18 +124,24 @@ pub fn generate_chunk(seed: u64, chunk_x: i64) -> BlockChunk {
 }
 
 pub(crate) fn generate_chunk_at(seed: u64, global_chunk_x: i64) -> BlockChunk {
-    let mut blocks = vec![0; (CHUNK_WIDTH * WORLD_HEIGHT) as usize];
+    let mut foreground = vec![0; (CHUNK_WIDTH * WORLD_HEIGHT) as usize];
+    let mut backwall = vec![0; (CHUNK_WIDTH * WORLD_HEIGHT) as usize];
     let start_x = global_chunk_x * i64::from(CHUNK_WIDTH);
     let end_x = start_x + i64::from(CHUNK_WIDTH);
     for world_x in start_x..end_x {
         let local_x = world_x.rem_euclid(i64::from(CHUNK_WIDTH)) as i32;
         for y in 0..WORLD_HEIGHT {
+            let index = (y * CHUNK_WIDTH + local_x) as usize;
             if let Some(kind) = generated_voxel(seed, world_x, y, 0) {
-                blocks[(y * CHUNK_WIDTH + local_x) as usize] = kind.code();
+                foreground[index] = kind.code();
+            }
+            if let Some(kind) = generated_voxel(seed, world_x, y, 1) {
+                backwall[index] = kind.code();
             }
         }
     }
-    BlockChunk::from_dense(global_chunk_x, blocks).expect("generated chunks are valid")
+    BlockChunk::from_dense(global_chunk_x, foreground, backwall)
+        .expect("generated chunks are valid")
 }
 
 fn generate_world(seed: u64) -> BlockGrid {
@@ -153,6 +159,7 @@ pub fn spawn_for_seed(seed: u64) -> Vec2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::VoxelLayer;
 
     #[test]
     fn generation_is_repeatable_across_positive_and_negative_chunks() {
@@ -168,7 +175,27 @@ mod tests {
         let again = generate_chunk_at(29, 1_000_000_000_000);
         let right = generate_chunk_at(29, 1_000_000_000_001);
         assert_eq!(left, again);
-        assert_ne!(left.blocks(), right.blocks());
+        assert_ne!(
+            left.blocks(VoxelLayer::Foreground),
+            right.blocks(VoxelLayer::Foreground)
+        );
+    }
+
+    #[test]
+    fn persistent_layers_match_generator_depths_zero_and_one() {
+        let chunk = generate_chunk_at(47, -2);
+        let start_x = chunk.x() * i64::from(CHUNK_WIDTH);
+        for layer in VoxelLayer::ALL {
+            for local_x in [0, CHUNK_WIDTH - 1] {
+                for y in [0, 17, WORLD_HEIGHT - 1] {
+                    let index = (y * CHUNK_WIDTH + local_x) as usize;
+                    assert_eq!(
+                        BlockState::from_code(chunk.blocks(layer)[index]),
+                        generated_voxel(47, start_x + i64::from(local_x), y, layer.depth())
+                    );
+                }
+            }
+        }
     }
 
     #[test]

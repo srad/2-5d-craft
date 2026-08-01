@@ -1,15 +1,15 @@
 use crate::application::{ChunkSnapshot, PlayerSnapshot, WorldSession, WorldSnapshot};
 use crate::domain::{
     BlockChunk, BlockGrid, BlockPrecondition, BlockState, BlockWrite, MutationBatchResult,
-    MutationPriority, MutationProposal, MutationReport, TorchMount, VoxelCell, VoxelPos,
-    WORLD_HEIGHT, WorldMutator, WorldView, generate_chunk_at, world_to_chunk,
+    MutationPriority, MutationProposal, MutationReport, TorchMount, VoxelCell, VoxelLayer,
+    VoxelPos, WORLD_HEIGHT, WorldMutator, WorldView, generate_chunk_at, world_to_chunk,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug)]
 pub struct WorldState {
     grid: BlockGrid,
-    persisted_chunks: BTreeMap<i64, Vec<u8>>,
+    persisted_chunks: BTreeMap<i64, BlockChunk>,
     dirty_chunks: BTreeSet<i64>,
     origin_chunk: i64,
     revision: u64,
@@ -35,7 +35,10 @@ impl WorldState {
         let persisted_chunks = snapshot
             .chunks
             .iter()
-            .map(|chunk| (chunk.x, chunk.blocks.clone()))
+            .filter_map(|chunk| {
+                BlockChunk::from_dense(chunk.x, chunk.foreground.clone(), chunk.backwall.clone())
+                    .map(|blocks| (chunk.x, blocks))
+            })
             .collect::<BTreeMap<_, _>>();
         let center_local_chunk = world_to_chunk(snapshot.player.local_x.floor() as i64);
         let origin_chunk = snapshot.player.chunk_x;
@@ -43,7 +46,6 @@ impl WorldState {
         let initial = persisted_chunks
             .get(&global_chunk)
             .cloned()
-            .and_then(|blocks| BlockChunk::from_dense(global_chunk, blocks))
             .unwrap_or_else(|| generate_chunk_at(snapshot.seed, global_chunk));
         let mut grid = BlockGrid::new(WORLD_HEIGHT);
         let report = WorldMutator::new(&mut grid).integrate_chunk(initial);
@@ -76,7 +78,7 @@ impl WorldState {
         self.seed
     }
 
-    pub fn persisted_blocks(&self, global_chunk_x: i64) -> Option<Vec<u8>> {
+    pub fn persisted_chunk(&self, global_chunk_x: i64) -> Option<BlockChunk> {
         self.persisted_chunks.get(&global_chunk_x).cloned()
     }
 
@@ -89,8 +91,7 @@ impl WorldState {
         if let Some(chunk) = removed
             && self.dirty_chunks.remove(&chunk_x)
         {
-            self.persisted_chunks
-                .insert(chunk_x, chunk.blocks().to_vec());
+            self.persisted_chunks.insert(chunk_x, chunk);
         }
         report
     }
@@ -117,13 +118,17 @@ impl WorldState {
     pub fn snapshot_chunks(&self) -> Vec<ChunkSnapshot> {
         let mut chunks = self.persisted_chunks.clone();
         for chunk_x in &self.dirty_chunks {
-            if let Some(blocks) = self.grid.chunk_snapshot(*chunk_x) {
-                chunks.insert(*chunk_x, blocks);
+            if let Some(chunk) = self.grid.chunk_snapshot(*chunk_x) {
+                chunks.insert(*chunk_x, chunk);
             }
         }
         chunks
             .into_iter()
-            .map(|(x, blocks)| ChunkSnapshot { x, blocks })
+            .map(|(x, chunk)| ChunkSnapshot {
+                x,
+                foreground: chunk.blocks(VoxelLayer::Foreground).to_vec(),
+                backwall: chunk.blocks(VoxelLayer::Backwall).to_vec(),
+            })
             .collect()
     }
 
@@ -157,10 +162,11 @@ impl WorldState {
         }
     }
 
-    pub fn local_to_voxel(&self, coordinate: glam::IVec2) -> VoxelPos {
-        VoxelPos::foreground(
+    pub fn local_to_voxel(&self, coordinate: glam::IVec2, layer: VoxelLayer) -> VoxelPos {
+        VoxelPos::new(
             self.origin_chunk * i64::from(crate::domain::CHUNK_WIDTH) + i64::from(coordinate.x),
             coordinate.y,
+            layer,
         )
     }
 }
@@ -311,6 +317,30 @@ mod tests {
             Err(WorldCommandError::Unbreakable)
         );
         assert_eq!(world.revision(), 0);
+    }
+
+    #[test]
+    fn backwall_changes_survive_streaming_unload_and_reload() {
+        let mut world = world();
+        let position = (1..WORLD_HEIGHT)
+            .rev()
+            .map(|y| VoxelPos::backwall(0, y))
+            .find(|position| world.view().cell(*position) == VoxelCell::Air)
+            .unwrap();
+        place_block(&mut world, position, BlockState::WOOD).unwrap();
+
+        world.unload_chunk(0);
+        let persisted = world.persisted_chunk(0).unwrap();
+        assert_eq!(
+            BlockState::from_code(
+                persisted.blocks(VoxelLayer::Backwall)
+                    [(position.y * crate::domain::CHUNK_WIDTH) as usize]
+            ),
+            Some(BlockState::WOOD)
+        );
+
+        world.integrate_chunk(persisted);
+        assert_eq!(world.view().block(position), Some(BlockState::WOOD));
     }
 
     #[test]

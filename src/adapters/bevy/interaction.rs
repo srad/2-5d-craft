@@ -11,7 +11,9 @@ use crate::{
         world::WorldMutationMessage,
     },
     application::{break_block, place_block},
-    domain::{BlockState, BlockTarget, TorchMount, target_from_ray, tile_overlaps_player},
+    domain::{
+        BlockState, BlockTarget, TorchMount, VoxelLayer, target_from_ray, tile_overlaps_player,
+    },
 };
 
 #[derive(Resource, Debug, Default, Deref, DerefMut)]
@@ -19,9 +21,12 @@ struct BlockTargetResource(BlockTarget);
 
 #[derive(Resource, Debug, Default)]
 struct MiningState {
-    target: Option<IVec2>,
+    target: Option<(VoxelLayer, IVec2)>,
     elapsed: f32,
 }
+
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq, Deref, DerefMut)]
+pub(crate) struct ActiveVoxelLayer(pub(crate) VoxelLayer);
 
 pub struct InteractionPlugin;
 
@@ -29,15 +34,57 @@ impl Plugin for InteractionPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<BlockTargetResource>()
             .init_resource::<MiningState>()
+            .init_resource::<ActiveVoxelLayer>()
+            .add_systems(OnEnter(AppState::LoadingWorld), reset_interaction_layer)
             .add_systems(OnEnter(AppState::Playing), ensure_selection_outline)
             .add_systems(
                 Update,
-                (update_target, mine_target, place_selected, update_highlight)
+                (
+                    toggle_active_layer,
+                    update_target,
+                    mine_target,
+                    place_selected,
+                    update_highlight,
+                )
                     .chain()
                     .in_set(RuntimeSet::Commands)
                     .run_if(in_state(AppState::Playing)),
             )
             .add_systems(OnEnter(AppState::Paused), clear_interaction);
+    }
+}
+
+fn reset_interaction_layer(
+    mut active: ResMut<ActiveVoxelLayer>,
+    mut target: ResMut<BlockTargetResource>,
+    mut mining: ResMut<MiningState>,
+) {
+    active.0 = VoxelLayer::Foreground;
+    target.0 = BlockTarget::default();
+    *mining = MiningState::default();
+}
+
+fn toggle_active_layer(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut active: ResMut<ActiveVoxelLayer>,
+    mut target: ResMut<BlockTargetResource>,
+    mut mining: ResMut<MiningState>,
+) {
+    if !keyboard.just_pressed(KeyCode::Tab) {
+        return;
+    }
+    active.0 = toggled_layer(active.0);
+    target.0 = BlockTarget {
+        layer: active.0,
+        ..Default::default()
+    };
+    *mining = MiningState::default();
+}
+
+fn toggled_layer(layer: VoxelLayer) -> VoxelLayer {
+    match layer {
+        VoxelLayer::Foreground => VoxelLayer::Backwall,
+        VoxelLayer::Backwall => VoxelLayer::Foreground,
     }
 }
 
@@ -58,22 +105,32 @@ fn update_target(
     camera: Single<(&Camera, &GlobalTransform), With<GameCamera>>,
     player: Single<&Transform, With<Player>>,
     world: Option<Res<WorldStateResource>>,
+    active: Res<ActiveVoxelLayer>,
     buttons: Query<&Interaction, With<Button>>,
     mut target: ResMut<BlockTargetResource>,
 ) {
     let Some(world) = world else {
-        target.0 = BlockTarget::default();
+        target.0 = BlockTarget {
+            layer: active.0,
+            ..Default::default()
+        };
         return;
     };
     if buttons
         .iter()
         .any(|interaction| *interaction != Interaction::None)
     {
-        target.0 = BlockTarget::default();
+        target.0 = BlockTarget {
+            layer: active.0,
+            ..Default::default()
+        };
         return;
     }
     let Some(cursor) = window.cursor_position() else {
-        target.0 = BlockTarget::default();
+        target.0 = BlockTarget {
+            layer: active.0,
+            ..Default::default()
+        };
         return;
     };
     let Ok(ray) = camera.0.viewport_to_world(camera.1, cursor) else {
@@ -86,6 +143,7 @@ fn update_target(
         player.translation.truncate(),
         &world.view(),
         world.origin_chunk(),
+        active.0,
     );
 }
 
@@ -109,11 +167,11 @@ fn mine_target(
         *mining = MiningState::default();
         return;
     };
-    if mining.target != Some(coordinate) {
-        mining.target = Some(coordinate);
+    if mining.target != Some((target.layer, coordinate)) {
+        mining.target = Some((target.layer, coordinate));
         mining.elapsed = 0.0;
     }
-    let position = world.local_to_voxel(coordinate);
+    let position = world.local_to_voxel(coordinate, target.layer);
     let Some(state) = world.view().block(position) else {
         *mining = MiningState::default();
         return;
@@ -151,10 +209,12 @@ fn place_selected(
     else {
         return;
     };
-    if tile_overlaps_player(coordinate, player.0.translation.truncate()) {
+    if target.layer == VoxelLayer::Foreground
+        && tile_overlaps_player(coordinate, player.0.translation.truncate())
+    {
         return;
     }
-    let position = world.local_to_voxel(coordinate);
+    let position = world.local_to_voxel(coordinate, target.layer);
     let Some(state) = placement_state(player.1.selected_state(), target.0) else {
         return;
     };
@@ -186,15 +246,27 @@ fn update_highlight(
     if let Some(coordinate) = target.block {
         outline.0.translation.x = coordinate.x as f32 + 0.5;
         outline.0.translation.y = coordinate.y as f32 + 0.5;
+        outline.0.translation.z = -f32::from(target.layer.depth());
         *outline.1 = Visibility::Visible;
     } else {
         *outline.1 = Visibility::Hidden;
     }
 }
 
-fn clear_interaction(mut target: ResMut<BlockTargetResource>, mut mining: ResMut<MiningState>) {
-    target.0 = BlockTarget::default();
+fn clear_interaction(
+    active: Res<ActiveVoxelLayer>,
+    mut target: ResMut<BlockTargetResource>,
+    mut mining: ResMut<MiningState>,
+    mut outlines: Query<&mut Visibility, With<SelectionOutline>>,
+) {
+    target.0 = BlockTarget {
+        layer: active.0,
+        ..Default::default()
+    };
     *mining = MiningState::default();
+    for mut visibility in &mut outlines {
+        *visibility = Visibility::Hidden;
+    }
 }
 
 #[cfg(test)]
@@ -213,6 +285,7 @@ mod tests {
                 placement_state(
                     BlockState::TORCH,
                     BlockTarget {
+                        layer: VoxelLayer::Foreground,
                         block: Some(IVec2::new(4, 4)),
                         adjacent: Some(adjacent),
                     },
@@ -228,5 +301,11 @@ mod tests {
             placement_state(BlockState::DIRT, BlockTarget::default()),
             Some(BlockState::DIRT)
         );
+    }
+
+    #[test]
+    fn layer_toggle_round_trips_to_foreground() {
+        assert_eq!(toggled_layer(VoxelLayer::Foreground), VoxelLayer::Backwall);
+        assert_eq!(toggled_layer(VoxelLayer::Backwall), VoxelLayer::Foreground);
     }
 }

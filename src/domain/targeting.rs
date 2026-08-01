@@ -1,12 +1,23 @@
-use crate::domain::{CHUNK_WIDTH, WorldView};
+use crate::domain::{CHUNK_WIDTH, VoxelLayer, WorldView};
 use glam::{IVec2, Vec2, Vec3};
 
 const REACH: f32 = 5.0;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockTarget {
+    pub layer: VoxelLayer,
     pub block: Option<IVec2>,
     pub adjacent: Option<IVec2>,
+}
+
+impl Default for BlockTarget {
+    fn default() -> Self {
+        Self {
+            layer: VoxelLayer::Foreground,
+            block: None,
+            adjacent: None,
+        }
+    }
 }
 
 pub fn target_from_ray(
@@ -15,10 +26,11 @@ pub fn target_from_ray(
     player: Vec2,
     view: &WorldView<'_>,
     origin_chunk: i64,
+    layer: VoxelLayer,
 ) -> BlockTarget {
     let mut nearest = None;
     let origin_x = origin_chunk * i64::from(CHUNK_WIDTH);
-    for (position, _) in view.iter() {
+    for (position, _) in view.iter_layer(layer) {
         let Ok(local_x) = i32::try_from(position.global_x - origin_x) else {
             continue;
         };
@@ -27,23 +39,32 @@ pub fn target_from_ray(
         if center.distance(player) > REACH + 1.0 {
             continue;
         }
-        let minimum = Vec3::new(coordinate.x as f32, coordinate.y as f32, -0.5);
+        let center_z = -f32::from(layer.depth());
+        let minimum = Vec3::new(coordinate.x as f32, coordinate.y as f32, center_z - 0.5);
         let maximum = minimum + Vec3::ONE;
         let Some((distance, normal)) = ray_box_intersection(origin, direction, minimum, maximum)
         else {
             continue;
         };
-        if distance < 0.0
-            || nearest
-                .as_ref()
-                .is_some_and(|(nearest_distance, _, _)| distance >= *nearest_distance)
-        {
+        if distance < 0.0 {
             continue;
         }
-        nearest = Some((distance, coordinate, normal));
+        let replace = match nearest.as_ref() {
+            None => true,
+            Some((nearest_distance, nearest_position, _, _)) => distance
+                .total_cmp(nearest_distance)
+                .then_with(|| position.cmp(nearest_position))
+                .is_lt(),
+        };
+        if replace {
+            nearest = Some((distance, position, coordinate, normal));
+        }
     }
-    let Some((distance, coordinate, normal)) = nearest else {
-        return BlockTarget::default();
+    let Some((distance, _, coordinate, normal)) = nearest else {
+        return BlockTarget {
+            layer,
+            ..Default::default()
+        };
     };
     let hit = origin + direction * distance;
     let adjacent = if normal.z.abs() > 0.5 {
@@ -52,6 +73,7 @@ pub fn target_from_ray(
         Some(coordinate + IVec2::new(normal.x.round() as i32, normal.y.round() as i32))
     };
     BlockTarget {
+        layer,
         block: Some(coordinate),
         adjacent,
     }
@@ -70,6 +92,7 @@ fn target_for_block(coordinate: IVec2, local: Vec2) -> BlockTarget {
         .map(|(_, direction)| direction)
         .unwrap_or(IVec2::Y);
     BlockTarget {
+        layer: VoxelLayer::Foreground,
         block: Some(coordinate),
         adjacent: Some(coordinate + direction),
     }
@@ -134,7 +157,7 @@ pub fn tile_overlaps_player(tile: IVec2, player_center: Vec2) -> bool {
 mod tests {
     use super::*;
     use crate::domain::{
-        BlockChunk, BlockGrid, BlockState, CHUNK_WIDTH, WORLD_HEIGHT, WorldMutator,
+        BlockChunk, BlockGrid, BlockState, CHUNK_WIDTH, VoxelLayer, WORLD_HEIGHT, WorldMutator,
     };
 
     #[test]
@@ -142,13 +165,17 @@ mod tests {
         let mut grid = BlockGrid::new(WORLD_HEIGHT);
         let mut blocks = vec![0; (CHUNK_WIDTH * WORLD_HEIGHT) as usize];
         blocks[(3 * CHUNK_WIDTH + 3) as usize] = BlockState::STONE.code();
-        WorldMutator::new(&mut grid).integrate_chunk(BlockChunk::from_dense(0, blocks).unwrap());
+        WorldMutator::new(&mut grid).integrate_chunk(
+            BlockChunk::from_dense(0, blocks, vec![0; (CHUNK_WIDTH * WORLD_HEIGHT) as usize])
+                .unwrap(),
+        );
         let target = target_from_ray(
             Vec3::new(3.5, 3.5, 10.0),
             Vec3::NEG_Z,
             Vec2::new(3.5, 2.0),
             &grid.view(),
             0,
+            VoxelLayer::Foreground,
         );
         assert_eq!(target.block, Some(IVec2::new(3, 3)));
     }
@@ -158,7 +185,10 @@ mod tests {
         let mut grid = BlockGrid::new(WORLD_HEIGHT);
         let mut blocks = vec![0; (CHUNK_WIDTH * WORLD_HEIGHT) as usize];
         blocks[(3 * CHUNK_WIDTH + 3) as usize] = BlockState::STONE.code();
-        WorldMutator::new(&mut grid).integrate_chunk(BlockChunk::from_dense(0, blocks).unwrap());
+        WorldMutator::new(&mut grid).integrate_chunk(
+            BlockChunk::from_dense(0, blocks, vec![0; (CHUNK_WIDTH * WORLD_HEIGHT) as usize])
+                .unwrap(),
+        );
         let offset = Vec3::new(16.0, 9.0, 36.0);
         let direction = -offset.normalize();
         let cases = [
@@ -174,9 +204,35 @@ mod tests {
                 Vec2::new(3.5, 2.0),
                 &grid.view(),
                 0,
+                VoxelLayer::Foreground,
             );
             assert_eq!(target.block, Some(IVec2::new(3, 3)));
             assert_eq!(target.adjacent, Some(adjacent));
+        }
+    }
+
+    #[test]
+    fn selected_layer_targets_overlapping_backwall_independently() {
+        let mut grid = BlockGrid::new(WORLD_HEIGHT);
+        let mut foreground = vec![0; (CHUNK_WIDTH * WORLD_HEIGHT) as usize];
+        let mut backwall = foreground.clone();
+        let index = (3 * CHUNK_WIDTH + 3) as usize;
+        foreground[index] = BlockState::STONE.code();
+        backwall[index] = BlockState::DIRT.code();
+        WorldMutator::new(&mut grid)
+            .integrate_chunk(BlockChunk::from_dense(0, foreground, backwall).unwrap());
+
+        for layer in VoxelLayer::ALL {
+            let target = target_from_ray(
+                Vec3::new(3.5, 3.5, 10.0),
+                Vec3::NEG_Z,
+                Vec2::new(3.5, 2.0),
+                &grid.view(),
+                0,
+                layer,
+            );
+            assert_eq!(target.layer, layer);
+            assert_eq!(target.block, Some(IVec2::new(3, 3)));
         }
     }
 

@@ -53,9 +53,9 @@ pub(crate) struct WorldPresentation {
 
 #[derive(Resource, Default)]
 struct WorldDirtySets {
-    render: BTreeSet<ChunkLayer>,
+    render: BTreeSet<i64>,
     lighting: BTreeSet<ChunkLayer>,
-    collision: BTreeSet<ChunkLayer>,
+    collision: BTreeSet<i64>,
     simulation: BTreeSet<VoxelPos>,
 }
 
@@ -304,11 +304,9 @@ fn request_chunk_generation(
         StreamConfig::default(),
     ) {
         let seed = world.seed();
-        let persisted = world.persisted_blocks(request.global_chunk_x);
+        let persisted = world.persisted_chunk(request.global_chunk_x);
         let task = pool.spawn(async move {
-            persisted
-                .and_then(|blocks| BlockChunk::from_dense(request.global_chunk_x, blocks))
-                .unwrap_or_else(|| generate_chunk_at(seed, request.global_chunk_x))
+            persisted.unwrap_or_else(|| generate_chunk_at(seed, request.global_chunk_x))
         });
         commands.spawn(ChunkGenerationTask {
             chunk_x: request.global_chunk_x,
@@ -409,22 +407,16 @@ fn apply_report_to_dirty(report: &MutationReport, dirty: &mut WorldDirtySets) {
             chunk_x: world_to_chunk(change.position.global_x),
             layer: change.position.layer,
         };
-        dirty.render.insert(chunk);
+        dirty.render.insert(chunk.chunk_x);
         dirty.lighting.insert(chunk);
         if change.position.layer == VoxelLayer::Foreground {
-            dirty.collision.insert(chunk);
+            dirty.collision.insert(chunk.chunk_x);
         }
         let local_x = change.position.global_x.rem_euclid(i64::from(CHUNK_WIDTH));
         if local_x == 0 {
-            dirty.render.insert(ChunkLayer {
-                chunk_x: chunk.chunk_x - 1,
-                ..chunk
-            });
+            dirty.render.insert(chunk.chunk_x - 1);
         } else if local_x == i64::from(CHUNK_WIDTH - 1) {
-            dirty.render.insert(ChunkLayer {
-                chunk_x: chunk.chunk_x + 1,
-                ..chunk
-            });
+            dirty.render.insert(chunk.chunk_x + 1);
         }
         for position in mutation_neighbors(change.position) {
             dirty.simulation.insert(position);
@@ -434,19 +426,13 @@ fn apply_report_to_dirty(report: &MutationReport, dirty: &mut WorldDirtySets) {
         let chunk = match change {
             ChunkChange::Integrated(chunk) | ChunkChange::Unloaded(chunk) => *chunk,
         };
-        dirty.render.insert(chunk);
+        dirty.render.insert(chunk.chunk_x);
         dirty.lighting.insert(chunk);
         if chunk.layer == VoxelLayer::Foreground {
-            dirty.collision.insert(chunk);
+            dirty.collision.insert(chunk.chunk_x);
         }
-        dirty.render.insert(ChunkLayer {
-            chunk_x: chunk.chunk_x - 1,
-            ..chunk
-        });
-        dirty.render.insert(ChunkLayer {
-            chunk_x: chunk.chunk_x + 1,
-            ..chunk
-        });
+        dirty.render.insert(chunk.chunk_x - 1);
+        dirty.render.insert(chunk.chunk_x + 1);
     }
 }
 
@@ -499,8 +485,10 @@ fn calculate_light_volume(world: &WorldState) -> LightVolume {
     let max_x = loaded_max_x.saturating_add(halo);
     let seed = world.seed();
     LightVolume::calculate(min_x, max_x, view.height(), DEPTH_SLICES, |x, y, depth| {
-        if depth == 0 && view.contains_chunk(ChunkLayer::foreground(world_to_chunk(x))) {
-            view.block(VoxelPos::foreground(x, y))
+        if let Some(layer) = VoxelLayer::from_persistent_depth(depth)
+            && view.contains_chunk(ChunkLayer::new(world_to_chunk(x), layer))
+        {
+            view.block(VoxelPos::new(x, y, layer))
         } else {
             generated_voxel(seed, x, y, depth)
         }
@@ -510,9 +498,7 @@ fn calculate_light_volume(world: &WorldState) -> LightVolume {
 fn mark_light_columns_dirty(changed_x: impl IntoIterator<Item = i64>, dirty: &mut WorldDirtySets) {
     for x in changed_x {
         for sample_x in [x.saturating_sub(1), x, x.saturating_add(1)] {
-            dirty
-                .render
-                .insert(ChunkLayer::foreground(world_to_chunk(sample_x)));
+            dirty.render.insert(world_to_chunk(sample_x));
         }
     }
 }
@@ -539,27 +525,24 @@ fn refresh_chunk_scenes(
         .chain(dirty.collision.iter())
         .copied()
         .collect::<BTreeSet<_>>();
-    for chunk in work {
-        let rebuild_render = dirty.render.contains(&chunk);
-        let rebuild_collision = dirty.collision.contains(&chunk);
-        if chunk.layer != VoxelLayer::Foreground {
+    for chunk_x in work {
+        let rebuild_render = dirty.render.contains(&chunk_x);
+        let rebuild_collision = dirty.collision.contains(&chunk_x);
+        if !world.view().contains_chunk(ChunkLayer::foreground(chunk_x)) {
+            despawn_chunk_entities(&mut commands, presentation, &mut retired, chunk_x);
             continue;
         }
-        if !world.view().contains_chunk(chunk) {
-            despawn_chunk_entities(&mut commands, presentation, &mut retired, chunk.chunk_x);
-            continue;
-        }
-        let local_chunk = chunk.chunk_x - world.origin_chunk();
+        let local_chunk = chunk_x - world.origin_chunk();
         let Ok(local_chunk) = i32::try_from(local_chunk) else {
             continue;
         };
         let transform = Transform::from_xyz((local_chunk * CHUNK_WIDTH) as f32, 0.0, 0.0);
-        let is_new = !presentation.chunk_scenes.contains_key(&chunk.chunk_x);
+        let is_new = !presentation.chunk_scenes.contains_key(&chunk_x);
         let rebuilt = (rebuild_render || is_new)
-            .then(|| build_chunk_meshes(&world.view(), chunk.chunk_x, world.seed(), &light));
-        let collider = (rebuild_collision || is_new)
-            .then(|| build_chunk_collider(&world.view(), chunk.chunk_x));
-        if let Some(scene) = presentation.chunk_scenes.get_mut(&chunk.chunk_x) {
+            .then(|| build_chunk_meshes(&world.view(), chunk_x, world.seed(), &light));
+        let collider =
+            (rebuild_collision || is_new).then(|| build_chunk_collider(&world.view(), chunk_x));
+        if let Some(scene) = presentation.chunk_scenes.get_mut(&chunk_x) {
             if let Some(rebuilt) = rebuilt {
                 update_chunk_layer(
                     &mut commands,
@@ -569,7 +552,7 @@ fn refresh_chunk_scenes(
                     rebuilt.opaque,
                     &catalog.opaque_material,
                     transform,
-                    chunk.chunk_x,
+                    chunk_x,
                 );
                 update_chunk_layer(
                     &mut commands,
@@ -579,7 +562,7 @@ fn refresh_chunk_scenes(
                     rebuilt.cutout,
                     &catalog.cutout_material,
                     transform,
-                    chunk.chunk_x,
+                    chunk_x,
                 );
                 update_chunk_layer(
                     &mut commands,
@@ -589,7 +572,7 @@ fn refresh_chunk_scenes(
                     rebuilt.emissive,
                     &catalog.emissive_material,
                     transform,
-                    chunk.chunk_x,
+                    chunk_x,
                 );
             }
             if let Some(collider) = collider {
@@ -605,7 +588,7 @@ fn refresh_chunk_scenes(
             .spawn((
                 transform,
                 RigidBody::Static,
-                ChunkCoordinate(chunk.chunk_x),
+                ChunkCoordinate(chunk_x),
                 WorldEntity,
             ))
             .id();
@@ -625,7 +608,7 @@ fn refresh_chunk_scenes(
                 rebuilt.opaque,
                 &catalog.opaque_material,
                 transform,
-                chunk.chunk_x,
+                chunk_x,
             );
             update_chunk_layer(
                 &mut commands,
@@ -635,7 +618,7 @@ fn refresh_chunk_scenes(
                 rebuilt.cutout,
                 &catalog.cutout_material,
                 transform,
-                chunk.chunk_x,
+                chunk_x,
             );
             update_chunk_layer(
                 &mut commands,
@@ -645,10 +628,10 @@ fn refresh_chunk_scenes(
                 rebuilt.emissive,
                 &catalog.emissive_material,
                 transform,
-                chunk.chunk_x,
+                chunk_x,
             );
         }
-        presentation.chunk_scenes.insert(chunk.chunk_x, scene);
+        presentation.chunk_scenes.insert(chunk_x, scene);
     }
     dirty.render.clear();
     dirty.collision.clear();
@@ -782,12 +765,9 @@ mod tests {
 
         apply_report_to_dirty(&report, &mut dirty);
 
-        assert_eq!(
-            dirty.render,
-            BTreeSet::from([ChunkLayer::foreground(-1), ChunkLayer::foreground(0),])
-        );
+        assert_eq!(dirty.render, BTreeSet::from([-1, 0]));
         assert_eq!(dirty.lighting, BTreeSet::from([ChunkLayer::foreground(0)]));
-        assert_eq!(dirty.collision, BTreeSet::from([ChunkLayer::foreground(0)]));
+        assert_eq!(dirty.collision, BTreeSet::from([0]));
         assert_eq!(dirty.simulation.len(), 5);
     }
 
@@ -801,16 +781,9 @@ mod tests {
 
         apply_report_to_dirty(&report, &mut dirty);
 
-        assert_eq!(
-            dirty.render,
-            BTreeSet::from([
-                ChunkLayer::foreground(3),
-                ChunkLayer::foreground(4),
-                ChunkLayer::foreground(5),
-            ])
-        );
+        assert_eq!(dirty.render, BTreeSet::from([3, 4, 5]));
         assert_eq!(dirty.lighting, BTreeSet::from([ChunkLayer::foreground(4)]));
-        assert_eq!(dirty.collision, BTreeSet::from([ChunkLayer::foreground(4)]));
+        assert_eq!(dirty.collision, BTreeSet::from([4]));
         assert!(dirty.simulation.is_empty());
     }
 
@@ -820,12 +793,30 @@ mod tests {
 
         mark_light_columns_dirty([31], &mut dirty);
 
-        assert_eq!(
-            dirty.render,
-            BTreeSet::from([ChunkLayer::foreground(0), ChunkLayer::foreground(1),])
-        );
+        assert_eq!(dirty.render, BTreeSet::from([0, 1]));
         assert!(dirty.lighting.is_empty());
         assert!(dirty.collision.is_empty());
         assert!(dirty.simulation.is_empty());
+    }
+
+    #[test]
+    fn backwall_reports_rebuild_rendering_and_lighting_without_collision() {
+        let position = VoxelPos::backwall(31, 12);
+        let report = MutationReport {
+            cell_changes: vec![CellChange {
+                position,
+                before: None,
+                after: Some(BlockState::STONE),
+            }],
+            chunk_changes: Vec::new(),
+        };
+        let mut dirty = WorldDirtySets::default();
+
+        apply_report_to_dirty(&report, &mut dirty);
+
+        assert_eq!(dirty.render, BTreeSet::from([0, 1]));
+        assert_eq!(dirty.lighting, BTreeSet::from([ChunkLayer::backwall(0)]));
+        assert!(dirty.collision.is_empty());
+        assert!(dirty.simulation.contains(&position));
     }
 }

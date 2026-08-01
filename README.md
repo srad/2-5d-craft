@@ -21,9 +21,9 @@ are important references.
 
 ## Project status
 
-The current baseline is playable but remains a foundation. Only the foreground
-slice is editable; the rear slices are generated visual depth. Block
-simulation, a persistent backwall, finite inventory, crafting, ecology, audio,
+The current baseline is playable but remains a foundation. The foreground and
+backwall are editable persistent layers; four deeper slices remain generated
+visual scenery. Block simulation, finite inventory, crafting, ecology, audio,
 and final presentation are not implemented yet.
 
 - [`ROADMAP.md`](ROADMAP.md) is the cross-session implementation plan.
@@ -50,20 +50,23 @@ The global texture-pack selection is stored in schema-1 `sidecraft.toml`.
 | `Space` | Jump |
 | Left mouse, held | Mine the targeted block |
 | Right mouse | Place the selected block |
+| `Tab` | Toggle foreground/backwall editing |
 | `1` through `8` | Select a hotbar block |
 | `Escape` | Pause or resume |
 | `F12` | Save a gameplay screenshot |
 
-The placement cursor has a five-block reach and refuses occupied cells,
-unsupported torches, and blocks overlapping the player.
+The placement cursor has a five-block reach and refuses occupied cells and
+unsupported torches. Foreground placement also refuses blocks overlapping the
+player; backwall blocks never collide with the player.
 
 ## What works
 
 - Deterministic, horizontally unbounded terrain in dense 32 by 80 chunks. Six
   correlated depth slices form a real voxel volume with grass, dirt, stone,
   ores, caves, trees, leaves, and an unbreakable bedrock floor.
-- The player and all interaction remain locked to the front slice while the
-  generated rear slices supply the visible 2.5D depth.
+- The player and collision remain locked to the foreground. Interaction can
+  switch between the foreground and persistent non-colliding backwall while
+  four generated rear slices supply additional 2.5D depth.
 - An `i64` global chunk coordinate plus a frequently rebased local `f32`
   simulation origin, so rendering and physics remain precise far from spawn.
 - Lazy multi-threaded chunk generation through Bevy's async compute pool.
@@ -108,9 +111,9 @@ Each world is a versioned `.scw` package directory:
    sorted content-addressed region index.
 2. Region `.scw` files containing at most 64 horizontal chunks each.
 3. A four-byte `SCW1` magic header and Zstandard compression on every file.
-4. A sorted Postcard block palette and chunk coordinates followed by dense,
-   row-major, one-byte-per-block arrays; zero means air and non-zero values
-   index the palette.
+4. A sorted Postcard block palette and chunk coordinates followed by paired
+   foreground/backwall dense row-major arrays; zero means air and non-zero
+   values index the palette.
 
 The loader rejects wrong headers, malformed compression, trailing metadata,
 invalid dimensions, unsorted or duplicate palettes and indexes, invalid block
@@ -124,10 +127,10 @@ Clock-only progress autosaves once per real minute of active play (1,200 day
 ticks); pause and exit preserve any whole-tick change. Compression and I/O run
 on Bevy's I/O task pool.
 
-Schema 4 is intentionally a fresh format. Legacy JSON metadata saves are
-neither loaded nor migrated. Top-level single-file SCW1 worlds are also
-rejected: schema 4 worlds are package directories only. M2 replaces the
-current save model with exact-schema SCW version 5.
+Schema 5 is intentionally a fresh two-layer format. Schema 4, legacy JSON
+metadata saves, and top-level single-file SCW1 worlds are neither loaded nor
+migrated; schema 5 worlds are package directories only. M2.3 will replace this
+format directly with exact schema 6 when persisted simulation state is added.
 
 ## Texture packs
 
