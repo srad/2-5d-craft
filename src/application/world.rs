@@ -1,8 +1,9 @@
 use crate::application::{ChunkSnapshot, PlayerSnapshot, WorldSession, WorldSnapshot};
 use crate::domain::{
-    BlockChunk, BlockGrid, BlockPrecondition, BlockState, BlockWrite, MutationBatchResult,
-    MutationPriority, MutationProposal, MutationReport, ScheduledTick, TorchMount, VoxelCell,
-    VoxelLayer, VoxelPos, WORLD_HEIGHT, WorldMutator, WorldView, generate_chunk_at, world_to_chunk,
+    BlockChunk, BlockGrid, BlockPrecondition, BlockState, BlockWrite, ChunkLayer,
+    MutationBatchResult, MutationPriority, MutationProposal, MutationReport, ScheduledTick,
+    ScheduledTickQueue, TorchMount, VoxelCell, VoxelLayer, VoxelPos, WORLD_HEIGHT, WorldMutator,
+    WorldView, generate_chunk_at, world_to_chunk,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -11,12 +12,11 @@ pub struct WorldState {
     grid: BlockGrid,
     persisted_chunks: BTreeMap<i64, BlockChunk>,
     dirty_chunks: BTreeSet<i64>,
-    pending_ticks: BTreeMap<i64, Vec<ScheduledTick>>,
+    pending_ticks: ScheduledTickQueue,
     origin_chunk: i64,
     revision: u64,
     seed: u64,
     world_tick: u64,
-    next_tick_sequence: u64,
 }
 
 #[derive(Debug)]
@@ -33,6 +33,16 @@ pub enum WorldCommandError {
     Unbreakable,
 }
 
+/// Why the world refused to queue simulation work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScheduleRejection {
+    /// The target chunk is not loaded. Simulation never force-loads a frontier chunk, so callers
+    /// defer this work until the chunk activates.
+    Unloaded,
+    /// The target cell lies outside the world height.
+    OutOfBounds,
+}
+
 impl WorldState {
     pub fn from_snapshot(snapshot: &WorldSnapshot) -> InitializedWorld {
         let persisted_chunks = snapshot
@@ -43,12 +53,14 @@ impl WorldState {
                     .map(|blocks| (chunk.x, blocks))
             })
             .collect::<BTreeMap<_, _>>();
-        let pending_ticks = snapshot
-            .chunks
-            .iter()
-            .filter(|chunk| !chunk.pending_ticks.is_empty())
-            .map(|chunk| (chunk.x, chunk.pending_ticks.clone()))
-            .collect::<BTreeMap<_, _>>();
+        let pending_ticks = ScheduledTickQueue::from_chunks(
+            snapshot
+                .chunks
+                .iter()
+                .filter(|chunk| !chunk.pending_ticks.is_empty())
+                .map(|chunk| (chunk.x, chunk.pending_ticks.clone())),
+            snapshot.next_tick_sequence,
+        );
         let center_local_chunk = world_to_chunk(snapshot.player.local_x.floor() as i64);
         let origin_chunk = snapshot.player.chunk_x;
         let global_chunk = origin_chunk + center_local_chunk;
@@ -68,7 +80,6 @@ impl WorldState {
                 revision: 0,
                 seed: snapshot.seed,
                 world_tick: snapshot.world_tick,
-                next_tick_sequence: snapshot.next_tick_sequence,
             },
             report,
         }
@@ -90,6 +101,53 @@ impl WorldState {
         self.seed
     }
 
+    pub fn world_tick(&self) -> u64 {
+        self.world_tick
+    }
+
+    /// Completes one logical simulation step and returns the new tick.
+    pub fn advance_world_tick(&mut self) -> u64 {
+        self.world_tick += 1;
+        self.world_tick
+    }
+
+    pub fn queued_ticks(&self) -> usize {
+        self.pending_ticks.queued_len()
+    }
+
+    /// Queues simulation work for a later tick.
+    ///
+    /// Scheduling requires a loaded chunk and marks that chunk dirty, because [`Self::snapshot_chunks`]
+    /// can only attach pending ticks to a chunk that owns a dense block array. Work for an
+    /// unloaded chunk is refused so callers defer it instead of creating unpersistable state.
+    pub fn schedule_tick(
+        &mut self,
+        position: VoxelPos,
+        priority: MutationPriority,
+        due_world_tick: u64,
+        expected: Option<BlockState>,
+    ) -> Result<ScheduledTick, ScheduleRejection> {
+        if !(0..self.view().height()).contains(&position.y) {
+            return Err(ScheduleRejection::OutOfBounds);
+        }
+        let chunk_x = world_to_chunk(position.global_x);
+        if !self
+            .view()
+            .contains_chunk(ChunkLayer::new(chunk_x, position.layer))
+        {
+            return Err(ScheduleRejection::Unloaded);
+        }
+        self.dirty_chunks.insert(chunk_x);
+        Ok(self
+            .pending_ticks
+            .schedule(position, priority, due_world_tick, expected))
+    }
+
+    /// Removes the work due at the current tick for the given sorted active chunks.
+    pub fn take_due_ticks(&mut self, active: &[i64]) -> Vec<ScheduledTick> {
+        self.pending_ticks.take_due(self.world_tick, active)
+    }
+
     pub fn persisted_chunk(&self, global_chunk_x: i64) -> Option<BlockChunk> {
         self.persisted_chunks.get(&global_chunk_x).cloned()
     }
@@ -103,7 +161,7 @@ impl WorldState {
         // A chunk that owes simulation work must keep its blocks even when nothing was edited,
         // otherwise the next save has no dense array to attach those ticks to.
         if let Some(chunk) = removed
-            && (self.dirty_chunks.remove(&chunk_x) || self.pending_ticks.contains_key(&chunk_x))
+            && (self.dirty_chunks.remove(&chunk_x) || self.pending_ticks.owes_work(chunk_x))
         {
             self.persisted_chunks.insert(chunk_x, chunk);
         }
@@ -138,9 +196,10 @@ impl WorldState {
         }
         debug_assert!(
             self.pending_ticks
-                .keys()
-                .all(|chunk_x| chunks.contains_key(chunk_x)),
-            "every chunk owing simulation work is retained by unload_chunk"
+                .chunks_owing_work()
+                .all(|chunk_x| chunks.contains_key(&chunk_x)),
+            "scheduling marks its chunk dirty and unload_chunk retains it, so owed work always \
+             has a dense array to attach to"
         );
         chunks
             .into_iter()
@@ -148,7 +207,7 @@ impl WorldState {
                 x,
                 foreground: chunk.blocks(VoxelLayer::Foreground).to_vec(),
                 backwall: chunk.blocks(VoxelLayer::Backwall).to_vec(),
-                pending_ticks: self.pending_ticks.get(&x).cloned().unwrap_or_default(),
+                pending_ticks: self.pending_ticks.pending_for_chunk(x).collect(),
             })
             .collect()
     }
@@ -170,7 +229,7 @@ impl WorldState {
             last_played_unix_s,
             day_time_ticks,
             world_tick: self.world_tick,
-            next_tick_sequence: self.next_tick_sequence,
+            next_tick_sequence: self.pending_ticks.next_sequence(),
             player: PlayerSnapshot {
                 chunk_x: self.origin_chunk
                     + (player_position.x.floor() as i64)
@@ -365,6 +424,103 @@ mod tests {
 
         world.integrate_chunk(persisted);
         assert_eq!(world.view().block(position), Some(BlockState::WOOD));
+    }
+
+    #[test]
+    fn scheduling_requires_a_loaded_chunk_inside_the_world() {
+        let mut world = world();
+        assert_eq!(
+            world.schedule_tick(
+                VoxelPos::foreground(5_000, 40),
+                MutationPriority::PLAYER,
+                10,
+                None,
+            ),
+            Err(ScheduleRejection::Unloaded)
+        );
+        assert_eq!(
+            world.schedule_tick(
+                VoxelPos::foreground(0, WORLD_HEIGHT),
+                MutationPriority::PLAYER,
+                10,
+                None,
+            ),
+            Err(ScheduleRejection::OutOfBounds)
+        );
+        assert_eq!(world.queued_ticks(), 0);
+    }
+
+    #[test]
+    fn scheduled_work_is_persisted_even_when_no_block_changed() {
+        let mut world = world();
+        let position = VoxelPos::foreground(3, 40);
+        let scheduled = world
+            .schedule_tick(
+                position,
+                MutationPriority::PLAYER,
+                7,
+                Some(BlockState::DIRT),
+            )
+            .unwrap();
+
+        let chunks = world.snapshot_chunks();
+        let chunk = chunks.iter().find(|chunk| chunk.x == 0).unwrap();
+        assert_eq!(chunk.pending_ticks, vec![scheduled]);
+        assert_eq!(scheduled.sequence, 0);
+    }
+
+    #[test]
+    fn owed_work_survives_unload_and_reload() {
+        let mut world = world();
+        let position = VoxelPos::foreground(3, 40);
+        let scheduled = world
+            .schedule_tick(position, MutationPriority::PLAYER, 7, None)
+            .unwrap();
+
+        world.unload_chunk(0);
+        let chunks = world.snapshot_chunks();
+        assert_eq!(
+            chunks
+                .iter()
+                .find(|chunk| chunk.x == 0)
+                .map(|chunk| chunk.pending_ticks.as_slice()),
+            Some([scheduled].as_slice())
+        );
+
+        world.integrate_chunk(world.persisted_chunk(0).unwrap());
+        world.advance_world_tick();
+        assert!(world.take_due_ticks(&[0]).is_empty());
+        for _ in 1..7 {
+            world.advance_world_tick();
+        }
+        assert_eq!(world.take_due_ticks(&[0]), vec![scheduled]);
+        assert_eq!(world.queued_ticks(), 0);
+    }
+
+    #[test]
+    fn scheduling_allocates_sequences_the_snapshot_validator_accepts() {
+        let mut world = world();
+        let position = VoxelPos::foreground(3, 40);
+        world
+            .schedule_tick(position, MutationPriority::PLAYER, 1, None)
+            .unwrap();
+        world
+            .schedule_tick(position, MutationPriority::PLAYER, 2, None)
+            .unwrap();
+
+        let session = WorldSession {
+            instance_id: crate::application::SessionInstanceId::new(1),
+            id: WorldId::new("test").unwrap(),
+            name: "Test".into(),
+            seed: 11,
+            generator_version: crate::domain::GENERATOR_VERSION,
+            created_at_unix_s: 1,
+            saved_version: crate::application::SaveVersion::default(),
+        };
+        let snapshot = world.snapshot(&session, glam::Vec2::new(1.5, 40.0), 1, 0, 9);
+
+        assert_eq!(snapshot.next_tick_sequence, 2);
+        crate::application::validate_snapshot(&snapshot).unwrap();
     }
 
     #[test]

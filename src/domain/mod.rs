@@ -1,6 +1,7 @@
 mod block;
 mod generation;
 mod lighting;
+mod simulation;
 mod targeting;
 mod time;
 mod world;
@@ -11,6 +12,11 @@ pub use generation::{
     surface_height_at_depth,
 };
 pub use lighting::{LightCell, LightVolume, MAX_LIGHT_LEVEL};
+pub use simulation::{
+    MAX_ACCUMULATED_SECONDS, MAX_SCHEDULED_PER_CHUNK_PER_TICK, MAX_STEPS_PER_FRAME,
+    SECONDS_PER_STEP, SIMULATION_TICKS_PER_SECOND, ScheduledTickQueue, SimulationClock,
+    SimulationRegionProvider, TickingArea,
+};
 pub use targeting::{BlockTarget, target_from_ray, tile_overlaps_player};
 pub use time::{
     DayCycle, MIDNIGHT_TICKS, MoonPhase, NOON_TICKS, SUNRISE_TICKS, SUNSET_TICKS, TICKS_PER_DAY,

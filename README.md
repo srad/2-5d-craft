@@ -23,8 +23,10 @@ are important references.
 
 The current baseline is playable but remains a foundation. The foreground and
 backwall are editable persistent layers; four deeper slices remain generated
-visual scenery. Block simulation, finite inventory, crafting, ecology, audio,
-and final presentation are not implemented yet.
+visual scenery. The world now runs a deterministic 20 TPS simulation clock with
+chunk activation, but no simulation rules use it yet. Fluids, gravity, growth,
+finite inventory, crafting, ecology, audio, and final presentation are not
+implemented yet.
 
 - [`ROADMAP.md`](ROADMAP.md) is the cross-session implementation plan.
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) is the binding architecture contract.
@@ -53,6 +55,7 @@ The global texture-pack selection is stored in schema-1 `sidecraft.toml`.
 | `Tab` | Toggle foreground/backwall editing |
 | `1` through `7` | Select a hotbar block |
 | `Escape` | Pause or resume |
+| `F3` | Toggle the top-left simulation debug overlay |
 | `F12` | Save a gameplay screenshot |
 
 The placement cursor has a five-block reach and refuses occupied cells and
@@ -76,6 +79,13 @@ player; backwall blocks never collide with the player.
 - Chunk-batched opaque, cutout, and emissive six-face meshes plus merged
   two-dimensional compound colliders instead of one render and physics entity
   per block. Empty render layers are omitted.
+- A 20 TPS logical simulation clock independent of Bevy's fixed timestep and
+  Avian's physics schedule. It advances only while playing, runs at most four
+  steps per frame, caps held time at 200 ms so overload slows game time instead
+  of bursting, and accumulates whole nanoseconds so exact frame multiples never
+  lose a tick. Scheduled work is drained in a stable order for active chunks
+  only; inactive chunks freeze and keep their queued ticks persisted. No
+  simulation rules are registered yet.
 - Avian2D kinematic movement, acceleration, jumping, gravity, grounded checks,
   collision sliding, world bounds, and fall recovery.
 - Hardness-based mining and adjacent-face placement.

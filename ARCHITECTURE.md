@@ -42,9 +42,11 @@ The implemented M1.1 layout follows that direction:
 
 ```text
 domain/
-    block, world, generation, targeting, lighting, time
+    block, world, generation, targeting, lighting, time,
+    simulation (clock, activation regions, scheduled-tick queue)
 application/
-    snapshot, repository port, session, streaming, world state, saving
+    snapshot, repository port, session, streaming, world state, saving,
+    simulation orchestration
 adapters/
     bevy/       ECS and presentation integrations
     storage/    schema-6 SCW package repository
@@ -362,6 +364,9 @@ types do not need traits.
 - `world_tick` increments only when a complete simulation step executes.
 - Pausing, loading, and time spent outside the process do not advance
   simulation.
+- Held time accumulates in whole nanoseconds. A floating-point seconds
+  accumulator drifts, and a reference clock that silently loses ticks is not
+  deterministic.
 
 ### Determinism and activation
 
@@ -384,6 +389,11 @@ and chunk-activation history.
   when its chunk activates.
 - Simulation never force-loads an inactive frontier chunk. Boundary work is
   deferred until that chunk becomes active.
+- Scheduling requires a loaded chunk and marks it persistence-dirty. A snapshot
+  can only attach pending ticks to a chunk that owns a dense block array, so
+  work queued for an absent chunk would be unsavable. The world rejects it, and
+  callers defer instead. Work already queued when a chunk unloads is retained
+  with that chunk's blocks.
 - Optional bounded ticking areas are supplied by the same region provider.
   Future multiplayer support can use the union of player regions without
   changing rule code.

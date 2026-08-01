@@ -26,23 +26,11 @@ pub struct GamePlugin;
 
 impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
+        RuntimeSet::configure_order(app);
         app.init_state::<AppState>()
             .insert_resource(Time::<Fixed>::from_hz(64.0))
             .insert_resource(Gravity(Vec2::NEG_Y * 25.0))
             .insert_resource(RepositoryHandle(Arc::new(ScwRepository::default())))
-            .configure_sets(
-                Update,
-                (
-                    RuntimeSet::Clock,
-                    RuntimeSet::CompletedWork,
-                    RuntimeSet::WorldMaintenance,
-                    RuntimeSet::Commands,
-                    RuntimeSet::MutationDispatch,
-                    RuntimeSet::Derived,
-                    RuntimeSet::Persistence,
-                )
-                    .chain(),
-            )
             .add_systems(PostStartup, finish_boot)
             .add_plugins((
                 adapters::bevy::textures::TexturePackPlugin,
@@ -55,6 +43,7 @@ impl Plugin for GamePlugin {
                 adapters::bevy::camera::CameraPlugin,
                 adapters::bevy::environment::EnvironmentPlugin,
                 adapters::bevy::showcase::MenuShowcasePlugin,
+                adapters::bevy::simulation::SimulationPlugin,
                 adapters::bevy::save::SavePlugin,
                 adapters::bevy::session::SessionPlugin,
                 adapters::bevy::ui::GameUiPlugin,

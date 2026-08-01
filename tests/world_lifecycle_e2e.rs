@@ -2,12 +2,13 @@ use bevy::prelude::Vec2;
 use sidecraft::{
     adapters::storage::ScwRepository,
     application::{
-        WorldRepository, WorldState, blank_snapshot, break_block, place_block, validate_snapshot,
+        PlayerSimulationRegions, StreamConfig, StreamWindow, WorldRepository, WorldState,
+        blank_snapshot, break_block, place_block, run_simulation, validate_snapshot,
     },
     domain::{
         BlockState, CHUNK_WIDTH, ChunkLayer, DEPTH_SLICES, DayCycle, LightVolume, MutationPriority,
-        ScheduledTick, VoxelLayer, VoxelPos, WORLD_HEIGHT, generate_chunk, generated_voxel,
-        spawn_for_seed, surface_height, world_to_chunk,
+        SECONDS_PER_STEP, SimulationClock, VoxelLayer, VoxelPos, WORLD_HEIGHT, generate_chunk,
+        generated_voxel, spawn_for_seed, surface_height, world_to_chunk,
     },
 };
 
@@ -50,42 +51,46 @@ fn new_world_edit_save_and_reload_lifecycle() {
     place_block(&mut world, overlapping_foreground, BlockState::WOOD).unwrap();
     place_block(&mut world, overlapping_backwall, BlockState::DIRT).unwrap();
 
+    // Logical time and the simulation queue are live state, not hand-written save fields.
+    let mut clock = SimulationClock::default();
+    let regions =
+        PlayerSimulationRegions::new(StreamWindow::new(0, StreamConfig::default()), Vec::new());
+    for _ in 0..5 {
+        run_simulation(&mut world, &mut clock, &regions, SECONDS_PER_STEP);
+    }
+    let owed = [
+        world
+            .schedule_tick(
+                placed,
+                MutationPriority::PLAYER,
+                world.world_tick() + 4,
+                Some(BlockState::WOOD),
+            )
+            .unwrap(),
+        world
+            .schedule_tick(
+                overlapping_backwall,
+                MutationPriority::PLAYER,
+                world.world_tick() + 99,
+                None,
+            )
+            .unwrap(),
+    ];
+
     let mut updated = loaded;
     updated.day_time_ticks = 123_456_789;
     updated.player.local_x = spawn.x + 2.0;
     updated.player.y = spawn.y + 1.0;
     updated.player.selected_slot = 6;
     updated.chunks = world.snapshot_chunks();
-    updated.world_tick = 24_601;
-    updated.next_tick_sequence = 3;
-    let owed = [
-        ScheduledTick {
-            due_world_tick: 24_605,
-            priority: MutationPriority::PLAYER,
-            position: placed,
-            sequence: 1,
-            expected: Some(BlockState::WOOD),
-        },
-        ScheduledTick {
-            due_world_tick: 24_700,
-            priority: MutationPriority::PLAYER,
-            position: overlapping_backwall,
-            sequence: 2,
-            expected: None,
-        },
-    ];
-    updated
-        .chunks
-        .iter_mut()
-        .find(|chunk| chunk.x == 0)
-        .expect("the edited chunk is saved")
-        .pending_ticks = owed.to_vec();
+    updated.world_tick = world.world_tick();
+    updated.next_tick_sequence = 2;
     repository.save(&id, &updated).unwrap();
 
     let reloaded = repository.load(&id).unwrap();
     validate_snapshot(&reloaded).unwrap();
-    assert_eq!(reloaded.world_tick, 24_601);
-    assert_eq!(reloaded.next_tick_sequence, 3);
+    assert_eq!(reloaded.world_tick, 5);
+    assert_eq!(reloaded.next_tick_sequence, 2);
     assert_eq!(
         reloaded
             .chunks

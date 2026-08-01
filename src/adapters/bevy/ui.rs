@@ -4,6 +4,7 @@ use bevy::prelude::*;
 use crate::{
     AppState,
     adapters::bevy::{
+        SimulationDebugVisible, SimulationDiagnostics,
         interaction::ActiveVoxelLayer,
         player::{Hotbar, Player},
         rendering::RenderCatalog,
@@ -78,6 +79,12 @@ struct SelectedItemText;
 #[derive(Component)]
 struct ActiveLayerText;
 
+#[derive(Component)]
+struct DebugOverlayRoot;
+
+#[derive(Component)]
+struct SimulationDebugText;
+
 #[derive(Resource, Clone)]
 pub(super) struct UiFont(pub(super) FontSource);
 
@@ -96,6 +103,7 @@ pub struct GameUiPlugin;
 impl Plugin for GameUiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<UiStatus>()
+            .init_resource::<SimulationDebugVisible>()
             .add_systems(OnEnter(AppState::LoadingWorld), spawn_loading_screen)
             .add_systems(OnEnter(AppState::Saving), spawn_saving_screen)
             .add_systems(OnEnter(AppState::Playing), (resume_physics, spawn_hud))
@@ -111,6 +119,9 @@ impl Plugin for GameUiPlugin {
                     update_status_text,
                     update_hotbar.run_if(in_state(AppState::Playing)),
                     update_active_layer_text.run_if(in_state(AppState::Playing)),
+                    (toggle_simulation_debug, update_simulation_debug_text)
+                        .chain()
+                        .run_if(in_state(AppState::Playing)),
                 ),
             );
         menus::register(app);
@@ -204,6 +215,7 @@ fn spawn_hud(
     ui_font: Res<UiFont>,
     render_catalog: Res<RenderCatalog>,
     active_layer: Res<ActiveVoxelLayer>,
+    debug_visible: Res<SimulationDebugVisible>,
 ) {
     let font = ui_font.0.clone();
     commands
@@ -302,6 +314,42 @@ fn spawn_hud(
                         }
                     });
             });
+        });
+    spawn_debug_overlay(&mut commands, &font, debug_visible.0);
+}
+
+/// Debug readouts live in their own top-left column, away from the gameplay HUD, so they stay
+/// legible and future diagnostics can stack under the same anchor.
+fn spawn_debug_overlay(commands: &mut Commands, font: &FontSource, visible: bool) {
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                top: px(12),
+                left: px(12),
+                flex_direction: FlexDirection::Column,
+                row_gap: px(4),
+                ..default()
+            },
+            DebugOverlayRoot,
+            DespawnOnExit(AppState::Playing),
+        ))
+        .with_children(|column| {
+            column.spawn((
+                Text::new(String::new()),
+                TextFont {
+                    font: font.clone(),
+                    font_size: FontSize::Px(24.0),
+                    ..default()
+                },
+                TextColor(Color::srgb(0.86, 0.91, 0.95)),
+                if visible {
+                    Visibility::Inherited
+                } else {
+                    Visibility::Hidden
+                },
+                SimulationDebugText,
+            ));
         });
 }
 
@@ -510,6 +558,49 @@ fn update_active_layer_text(
     for mut label in &mut labels {
         label.0 = active_layer_label(active_layer.0).into();
     }
+}
+
+fn toggle_simulation_debug(
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mut visible: ResMut<SimulationDebugVisible>,
+    mut texts: Query<&mut Visibility, With<SimulationDebugText>>,
+) {
+    if !keyboard.just_pressed(KeyCode::F3) {
+        return;
+    }
+    visible.0 = !visible.0;
+    for mut visibility in &mut texts {
+        *visibility = if visible.0 {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+    }
+}
+
+fn update_simulation_debug_text(
+    visible: Res<SimulationDebugVisible>,
+    diagnostics: Res<SimulationDiagnostics>,
+    mut texts: Query<&mut Text, With<SimulationDebugText>>,
+) {
+    if !visible.0 {
+        return;
+    }
+    for mut text in &mut texts {
+        text.0 = simulation_debug_label(&diagnostics);
+    }
+}
+
+fn simulation_debug_label(diagnostics: &SimulationDiagnostics) -> String {
+    format!(
+        "tick {} | steps {} | processed {} | queued {} | active {}+{} [F3]",
+        diagnostics.world_tick,
+        diagnostics.steps_last_frame,
+        diagnostics.processed_last_frame,
+        diagnostics.queued_ticks,
+        diagnostics.simulated_chunks,
+        diagnostics.ticking_areas,
+    )
 }
 
 fn active_layer_label(layer: VoxelLayer) -> &'static str {

@@ -49,6 +49,12 @@ impl StreamWindow {
         self.distance(chunk_x) <= u64::from(self.config.simulation_radius)
     }
 
+    /// The simulated chunks, ascending, skipping coordinates that would overflow.
+    pub fn simulation_chunks(self) -> impl Iterator<Item = i64> {
+        let radius = i64::from(self.config.simulation_radius);
+        (-radius..=radius).filter_map(move |offset| self.center_chunk.checked_add(offset))
+    }
+
     pub fn contains_render(self, chunk_x: i64) -> bool {
         self.distance(chunk_x) <= u64::from(self.config.render_radius)
     }
@@ -175,6 +181,22 @@ mod tests {
         assert!(!window.contains_render(4));
         assert!(!window.should_unload(3));
         assert!(window.should_unload(2));
+    }
+
+    #[test]
+    fn simulated_chunks_cover_the_radius_and_survive_overflow() {
+        assert_eq!(
+            StreamWindow::new(10, StreamConfig::default())
+                .simulation_chunks()
+                .collect::<Vec<_>>(),
+            vec![7, 8, 9, 10, 11, 12, 13]
+        );
+        assert_eq!(
+            StreamWindow::new(i64::MAX, StreamConfig::default())
+                .simulation_chunks()
+                .collect::<Vec<_>>(),
+            (i64::MAX - 3..=i64::MAX).collect::<Vec<_>>()
+        );
     }
 
     #[test]

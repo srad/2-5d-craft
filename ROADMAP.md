@@ -20,19 +20,29 @@ caves, water, plants, and technology progression of
 
 ## Resume here
 
-- Active item: M2.3 — SCW schema 6; implemented and locally verified, awaiting
-  manual real-GPU acceptance
-- Next item: M3.1 — clock and activation
+- Active item: M3.1 — clock and activation
+- Next item: M3.2 — deterministic rule engine
+- Deferred item: M2.3 — SCW schema 6; implemented and locally verified, still
+  awaiting its manual real-GPU acceptance pass. Returned to `[ ]` so exactly one
+  item is active; M2 cannot be marked complete until that pass runs.
 - Deferred item: M1.3 — add one local PowerShell quality-gate command
 - Blocker: none
 - Last completed work item: M2.2 streaming — added strict 3/5/7 activation,
   presentation, and retention bands; capacity-bounded nearest-first generation;
   complete result provenance; orphan draining; and deterministic integration
 - Verification baseline: confirmed 2026-08-01; formatting, Clippy with warnings
-  denied, 186 automated tests, the release build, and the scoped diff check
-  passed locally. The M2.3 real-GPU pass has not been run: launch a new world,
-  edit both layers, save, reload, and confirm the 75 existing schema-5 packages
-  in `worlds/` list as invalid instead of crashing or regenerating.
+  denied, 219 workspace tests, the release build, and the scoped diff check
+  passed locally. Two real-GPU passes are outstanding:
+  - M2.3: launch a new world, edit both layers, save, reload, and confirm the
+    75 existing schema-5 packages in `worlds/` list as invalid instead of
+    crashing or regenerating.
+  - M3.1: with `SIDECRAFT_AUTOSTART` and `SIDECRAFT_TEST_SIMULATION_FIXTURE`
+    set, press `F3` and confirm the tick counter advances at roughly 20/s, the
+    spawn-chunk fixture work drains, the work four chunks away stays queued,
+    the counter freezes while paused and loading and resumes without a burst,
+    walking toward the frozen chunk drains it, and a save/reload restores the
+    tick and any remaining queued work. Movement, collision, and camera
+    behaviour must be unchanged.
 - Known pre-existing lint debt outside the documented gate: three
   `len_zero` Clippy warnings in `crates/sidecraft-texture-editor`
   (`src/preview/scene.rs`), which only appear under `--workspace`.
@@ -157,7 +167,7 @@ local gates pass.
   Clippy with warnings denied, 176 tests, release build, scoped diff check, and
   a deterministic real-GPU gameplay capture.
 
-### M2.3 SCW schema 6 `[~]`
+### M2.3 SCW schema 6 `[ ]`
 
 - `[x]` Replace current save structs with one current-schema representation;
   do not keep version-suffixed legacy Rust types.
@@ -187,18 +197,28 @@ cannot replace the last valid manifest.
 
 ## M3 — Deterministic living-world simulation `[ ]`
 
-### M3.1 Clock and activation
+### M3.1 Clock and activation `[~]`
 
-- `[ ]` Add an independent 20 TPS simulation clock without changing Bevy's
-  fixed clock or Avian physics schedule.
-- `[ ]` Run at most four logical simulation steps per rendered frame and cap
+- `[x]` Add an independent 20 TPS simulation clock without changing Bevy's
+  fixed clock or Avian physics schedule. The clock accumulates whole
+  nanoseconds; an `f64` seconds accumulator lost a tick to rounding on exact
+  50 ms frames.
+- `[x]` Run at most four logical simulation steps per rendered frame and cap
   accumulated wall-time at 200 ms.
-- `[ ]` Advance only while playing; pause, loading, and process downtime do not
+- `[x]` Advance only while playing; pause, loading, and process downtime do not
   catch up.
-- `[ ]` Simulate only the active radius from `SimulationRegionProvider`.
-- `[ ]` Freeze inactive chunks and persist their pending scheduled ticks.
-- `[ ]` Add optional bounded ticking areas without coupling rules to the
+- `[x]` Simulate only the active radius from `SimulationRegionProvider`.
+- `[x]` Freeze inactive chunks and persist their pending scheduled ticks.
+  Scheduling requires a loaded chunk and marks it dirty, because a snapshot can
+  only attach pending ticks to a chunk that owns a dense array.
+- `[x]` Add optional bounded ticking areas without coupling rules to the
   current single-player region.
+- `[x]` Add an `F3` top-left debug overlay and a `SIDECRAFT_TEST_SIMULATION_FIXTURE`
+  seed, because a clock with no rules is otherwise invisible to manual
+  acceptance.
+- `[ ]` M3.1 verification: formatting, Clippy with warnings denied, 219
+  workspace tests, the release build, and the scoped diff check passed locally.
+  Manual real-GPU acceptance is still pending, so this item stays open.
 
 ### M3.2 Deterministic rule engine
 
