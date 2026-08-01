@@ -47,9 +47,10 @@ pub(super) fn spawn_scene(
         cull_mode: None,
         ..default()
     });
-    let opaque_mesh = meshes.add(MeshBuilder::default().finish());
-    let cutout_mesh = meshes.add(MeshBuilder::default().finish());
-    let torch_mesh = meshes.add(MeshBuilder::default().finish());
+    let built = build_scene_meshes(PreviewLighting::Day);
+    let opaque_mesh = meshes.add(built.opaque);
+    let cutout_mesh = meshes.add(built.cutout);
+    let torch_mesh = meshes.add(built.torch);
     commands.spawn((
         Mesh3d(opaque_mesh.clone()),
         MeshMaterial3d(opaque_material),
@@ -530,8 +531,26 @@ mod tests {
         let built = build_scene_meshes(PreviewLighting::Day);
         assert!(built.opaque.count_vertices() > 0);
         assert!(built.cutout.count_vertices() > 0);
+        assert!(built.torch.count_vertices() > 0);
         assert_eq!(built.torch.count_vertices(), 3 * 6 * 4);
-        assert!(built.opaque.indices().is_some());
+        assert!(
+            built
+                .opaque
+                .indices()
+                .is_some_and(|indices| indices.len() > 0)
+        );
+        assert!(
+            built
+                .cutout
+                .indices()
+                .is_some_and(|indices| indices.len() > 0)
+        );
+        assert!(
+            built
+                .torch
+                .indices()
+                .is_some_and(|indices| indices.len() > 0)
+        );
         assert!(built.opaque.attribute(Mesh::ATTRIBUTE_UV_0).is_some());
         assert!(built.opaque.attribute(Mesh::ATTRIBUTE_COLOR).is_some());
     }
