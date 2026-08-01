@@ -47,7 +47,7 @@ application/
     snapshot, repository port, session, streaming, world state, saving
 adapters/
     bevy/       ECS and presentation integrations
-    storage/    schema-5 SCW package repository
+    storage/    schema-6 SCW package repository
 crates/
     sidecraft-texture-editor/
                 Standalone Bevy/egui texture-project editor; depends on
@@ -58,7 +58,7 @@ lib.rs          composition root and schedule ordering
 ```
 
 Domain snapshots are schema-neutral and world IDs are path-free. The storage
-adapter maps those values to the current schema-5 package layout. The Bevy
+adapter maps those values to the current schema-6 package layout. The Bevy
 adapter uses thin resource wrappers because Bevy resources must implement its
 ECS component contract; the wrapped domain and application types remain
 framework-independent.
@@ -372,7 +372,10 @@ and chunk-activation history.
   attempt index. Hash-map iteration order and a mutable global RNG cannot affect
   results.
 - Scheduled ticks use the stable key `(due_world_tick, priority,
-  global_chunk_x, position, sequence)`.
+  global_chunk_x, position, sequence)`. The `ScheduledTick` domain type and its
+  persistence exist ahead of the engine, so M3 adds rules and queues without
+  changing the save format. Its declared field order is that key; the chunk is
+  implied because `world_to_chunk` is monotonic in the position.
 - Default simulation radius is 3 chunks, render radius is 5, and unload radius
   is 7. All are configuration values.
 - Inactive chunks freeze. They receive no random ticks and no wall-clock
@@ -422,27 +425,37 @@ Only the current SCW schema is accepted. A structural change bumps
 `schema_version`, deletes the previous reader and tests, and intentionally
 invalidates existing prototype worlds.
 
-The current schema is exactly version 5:
+The current schema is exactly version 6:
 
-- Every file begins with an `SCW1` envelope.
-- Postcard encodes metadata, palettes, and region references.
+- Every file begins with a 16-byte plaintext envelope: `SCW1`, the schema
+  version, and a checksum of the compressed payload. Size, magic, schema, and
+  checksum are rejected before anything is decompressed. The schema version
+  exists only in the envelope, so no encoded struct can disagree with it.
+- Postcard encodes metadata, palettes, region references, and pending ticks.
 - Zstandard compresses each payload.
 - Palette value `0` means air. Values `1..=255` index at most 255 non-air
-  `BlockState` entries.
+  `BlockState` entries drawn from that one region.
 - Each saved chunk has independent dense row-major, one-byte-per-block
-  foreground and backwall arrays.
+  foreground and backwall arrays. A region file carries its Postcard header
+  under a length prefix and the dense arrays after it as raw bytes.
+- Each saved chunk also carries its own pending scheduled ticks, strictly
+  ordered by `(due_world_tick, priority, position, sequence)`. A chunk that
+  owes simulation work is persisted even when its blocks are unchanged.
 - Region files are immutable and content-addressed. Unchanged references are
-  reused, and the schema version is a domain separator in every region hash.
+  reused; the hash covers chunk coordinates, both dense arrays, and pending
+  ticks, with the schema version as a domain separator. It is computed from
+  field bytes, never from an encoded payload.
+- A region file stores its region index, seed, and generator version, so it
+  cannot be substituted from another world or another region.
 - Region files are flushed and synced before an atomically replaced manifest
   publishes the new snapshot.
 - Obsolete regions are removed only after manifest publication. Failed cleanup
   is harmless and retryable.
 - The manifest stores seed, generator version, world dimensions, player state,
-  absolute day ticks, and sorted region references.
-
-M2.3 replaces this prototype layout with exact schema version 6, adding
-`world_tick`, the next tick sequence, and region-local pending scheduled ticks.
-Schema 5 will be invalidated rather than migrated.
+  absolute day ticks, `world_tick`, the next tick sequence, and sorted region
+  references.
+- Encoding is a pure function of the snapshot: identical worlds produce
+  identical bytes.
 
 M4.1 replaces schema 6 with exact schema 7. Player metadata gains the 36 fixed
 inventory slots, selected slot, durability, and transient crafting/cursor

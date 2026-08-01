@@ -42,6 +42,7 @@ fn persisted_chunks_reconstruct_the_same_light_field() {
                 backwall: chunk
                     .blocks(sidecraft::domain::VoxelLayer::Backwall)
                     .to_vec(),
+                pending_ticks: Vec::new(),
             })
             .collect(),
         spawn_for_seed(41),

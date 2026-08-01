@@ -19,7 +19,7 @@ pub use time::{
 pub use world::{
     BlockChunk, BlockGrid, BlockPrecondition, BlockWrite, CellChange, ChunkChange, ChunkLayer,
     MutationBatchResult, MutationPriority, MutationProposal, MutationRejection, MutationReport,
-    ProposalOutcome, VoxelCell, VoxelLayer, VoxelPos, WorldMutator, WorldView,
+    ProposalOutcome, ScheduledTick, VoxelCell, VoxelLayer, VoxelPos, WorldMutator, WorldView,
     chunk_is_representable, world_to_chunk,
 };
 

@@ -97,6 +97,34 @@ impl MutationPriority {
     pub const PLAYER: Self = Self(0);
 }
 
+/// Simulation work scheduled for a later world tick.
+///
+/// The declared field order is the stable ordering key from `ARCHITECTURE.md`:
+/// `(due_world_tick, priority, global_chunk_x, position, sequence)`. A separate chunk field
+/// would be a second source of truth, because [`world_to_chunk`] is monotonic in
+/// [`VoxelPos::global_x`] and therefore already orders ticks chunk by chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ScheduledTick {
+    pub due_world_tick: u64,
+    pub priority: MutationPriority,
+    pub position: VoxelPos,
+    pub sequence: u64,
+    pub expected: Option<BlockState>,
+}
+
+impl ScheduledTick {
+    /// The identity two scheduled ticks may not share. `expected` is deliberately excluded:
+    /// it records what the tick assumes about the world, not which tick it is.
+    pub fn key(self) -> (u64, MutationPriority, VoxelPos, u64) {
+        (
+            self.due_world_tick,
+            self.priority,
+            self.position,
+            self.sequence,
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockPrecondition {
     pub position: VoxelPos,
@@ -584,6 +612,38 @@ mod tests {
         assert_eq!(world_to_chunk(0), 0);
         assert_eq!(world_to_chunk(31), 0);
         assert_eq!(world_to_chunk(32), 1);
+    }
+
+    #[test]
+    fn scheduled_ticks_sort_by_the_stable_key_and_ignore_expected_blocks() {
+        let tick = |due, priority, global_x, sequence| ScheduledTick {
+            due_world_tick: due,
+            priority: MutationPriority(priority),
+            position: VoxelPos::foreground(global_x, 4),
+            sequence,
+            expected: None,
+        };
+        let ordered = [
+            tick(1, 0, 100, 0),
+            tick(2, 0, -65, 0),
+            tick(2, 1, -65, 0),
+            tick(2, 1, -33, 0),
+            tick(2, 1, -33, 1),
+        ];
+        let mut shuffled = [ordered[3], ordered[0], ordered[4], ordered[2], ordered[1]];
+        shuffled.sort();
+        assert_eq!(shuffled, ordered);
+        assert!(
+            world_to_chunk(ordered[1].position.global_x)
+                < world_to_chunk(ordered[3].position.global_x)
+        );
+
+        let expecting_stone = ScheduledTick {
+            expected: Some(BlockState::STONE),
+            ..ordered[0]
+        };
+        assert_eq!(expecting_stone.key(), ordered[0].key());
+        assert_ne!(expecting_stone, ordered[0]);
     }
 
     #[test]

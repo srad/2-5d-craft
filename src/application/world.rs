@@ -1,8 +1,8 @@
 use crate::application::{ChunkSnapshot, PlayerSnapshot, WorldSession, WorldSnapshot};
 use crate::domain::{
     BlockChunk, BlockGrid, BlockPrecondition, BlockState, BlockWrite, MutationBatchResult,
-    MutationPriority, MutationProposal, MutationReport, TorchMount, VoxelCell, VoxelLayer,
-    VoxelPos, WORLD_HEIGHT, WorldMutator, WorldView, generate_chunk_at, world_to_chunk,
+    MutationPriority, MutationProposal, MutationReport, ScheduledTick, TorchMount, VoxelCell,
+    VoxelLayer, VoxelPos, WORLD_HEIGHT, WorldMutator, WorldView, generate_chunk_at, world_to_chunk,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -11,9 +11,12 @@ pub struct WorldState {
     grid: BlockGrid,
     persisted_chunks: BTreeMap<i64, BlockChunk>,
     dirty_chunks: BTreeSet<i64>,
+    pending_ticks: BTreeMap<i64, Vec<ScheduledTick>>,
     origin_chunk: i64,
     revision: u64,
     seed: u64,
+    world_tick: u64,
+    next_tick_sequence: u64,
 }
 
 #[derive(Debug)]
@@ -40,6 +43,12 @@ impl WorldState {
                     .map(|blocks| (chunk.x, blocks))
             })
             .collect::<BTreeMap<_, _>>();
+        let pending_ticks = snapshot
+            .chunks
+            .iter()
+            .filter(|chunk| !chunk.pending_ticks.is_empty())
+            .map(|chunk| (chunk.x, chunk.pending_ticks.clone()))
+            .collect::<BTreeMap<_, _>>();
         let center_local_chunk = world_to_chunk(snapshot.player.local_x.floor() as i64);
         let origin_chunk = snapshot.player.chunk_x;
         let global_chunk = origin_chunk + center_local_chunk;
@@ -54,9 +63,12 @@ impl WorldState {
                 grid,
                 persisted_chunks,
                 dirty_chunks: BTreeSet::new(),
+                pending_ticks,
                 origin_chunk,
                 revision: 0,
                 seed: snapshot.seed,
+                world_tick: snapshot.world_tick,
+                next_tick_sequence: snapshot.next_tick_sequence,
             },
             report,
         }
@@ -88,8 +100,10 @@ impl WorldState {
 
     pub fn unload_chunk(&mut self, chunk_x: i64) -> MutationReport {
         let (removed, report) = WorldMutator::new(&mut self.grid).unload_chunk(chunk_x);
+        // A chunk that owes simulation work must keep its blocks even when nothing was edited,
+        // otherwise the next save has no dense array to attach those ticks to.
         if let Some(chunk) = removed
-            && self.dirty_chunks.remove(&chunk_x)
+            && (self.dirty_chunks.remove(&chunk_x) || self.pending_ticks.contains_key(&chunk_x))
         {
             self.persisted_chunks.insert(chunk_x, chunk);
         }
@@ -122,12 +136,19 @@ impl WorldState {
                 chunks.insert(*chunk_x, chunk);
             }
         }
+        debug_assert!(
+            self.pending_ticks
+                .keys()
+                .all(|chunk_x| chunks.contains_key(chunk_x)),
+            "every chunk owing simulation work is retained by unload_chunk"
+        );
         chunks
             .into_iter()
             .map(|(x, chunk)| ChunkSnapshot {
                 x,
                 foreground: chunk.blocks(VoxelLayer::Foreground).to_vec(),
                 backwall: chunk.blocks(VoxelLayer::Backwall).to_vec(),
+                pending_ticks: self.pending_ticks.get(&x).cloned().unwrap_or_default(),
             })
             .collect()
     }
@@ -148,6 +169,8 @@ impl WorldState {
             created_at_unix_s: session.created_at_unix_s,
             last_played_unix_s,
             day_time_ticks,
+            world_tick: self.world_tick,
+            next_tick_sequence: self.next_tick_sequence,
             player: PlayerSnapshot {
                 chunk_x: self.origin_chunk
                     + (player_position.x.floor() as i64)

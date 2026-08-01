@@ -111,14 +111,20 @@ Each world is a versioned `.scw` package directory:
 1. An atomically replaced `manifest.scw` containing Postcard metadata and the
    sorted content-addressed region index.
 2. Region `.scw` files containing at most 64 horizontal chunks each.
-3. A four-byte `SCW1` magic header and Zstandard compression on every file.
+3. A sixteen-byte plaintext envelope on every file: the `SCW1` magic, the
+   schema version, and a checksum of the Zstandard-compressed payload.
 4. A sorted Postcard block palette and chunk coordinates followed by paired
    foreground/backwall dense row-major arrays; zero means air and non-zero
    values index the palette.
+5. Per-chunk pending simulation ticks, plus the global `world_tick` and next
+   tick sequence in the manifest.
 
-The loader rejects wrong headers, malformed compression, trailing metadata,
-invalid dimensions, unsorted or duplicate palettes and indexes, invalid block
-indices, mismatched region hashes, oversized data, and invalid runtime fields.
+The loader rejects wrong magic, wrong schema, failed checksums, malformed
+compression, trailing metadata, invalid dimensions, unsorted or duplicate
+palettes and indexes, invalid block indices, mismatched region hashes,
+foreign region identity, malformed pending ticks, oversized data, and invalid
+runtime fields. Magic, schema, and checksum are all rejected before anything is
+decompressed.
 Changed region files are flushed and synced before the manifest is atomically
 replaced; unchanged content-addressed regions are reused. Only chunks changed
 by the player are persisted, while untouched terrain is regenerated exactly
@@ -128,10 +134,12 @@ Clock-only progress autosaves once per real minute of active play (1,200 day
 ticks); pause and exit preserve any whole-tick change. Compression and I/O run
 on Bevy's I/O task pool.
 
-Schema 5 is intentionally a fresh two-layer format. Schema 4, legacy JSON
-metadata saves, and top-level single-file SCW1 worlds are neither loaded nor
-migrated; schema 5 worlds are package directories only. M2.3 will replace this
-format directly with exact schema 6 when persisted simulation state is added.
+Schema 6 is exact: only `schema_version = 6` loads. Earlier schemas, legacy
+JSON metadata saves, and top-level single-file SCW1 worlds are neither loaded
+nor migrated, and schema 6 worlds are package directories only. Encoding is a
+pure function of the world snapshot, so identical worlds produce identical
+bytes. M4.1 will replace this format directly with exact schema 7 when
+inventories, drops, and station state are added.
 
 ## Texture packs
 

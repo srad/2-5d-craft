@@ -1,5 +1,6 @@
 use crate::domain::{
-    BlockState, CHUNK_WIDTH, GENERATOR_VERSION, WORLD_HEIGHT, chunk_is_representable,
+    BlockState, CHUNK_WIDTH, GENERATOR_VERSION, ScheduledTick, WORLD_HEIGHT,
+    chunk_is_representable, world_to_chunk,
 };
 use glam::Vec2;
 use std::fmt;
@@ -13,6 +14,8 @@ pub struct WorldSnapshot {
     pub created_at_unix_s: u64,
     pub last_played_unix_s: u64,
     pub day_time_ticks: u64,
+    pub world_tick: u64,
+    pub next_tick_sequence: u64,
     pub player: PlayerSnapshot,
     pub chunks: Vec<ChunkSnapshot>,
 }
@@ -30,6 +33,8 @@ pub struct ChunkSnapshot {
     pub x: i64,
     pub foreground: Vec<u8>,
     pub backwall: Vec<u8>,
+    /// Simulation work owed by this chunk, strictly ordered by [`ScheduledTick::key`].
+    pub pending_ticks: Vec<ScheduledTick>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,12 +111,48 @@ pub fn validate_snapshot(snapshot: &WorldSnapshot) -> Result<(), SnapshotError> 
                 )));
             }
         }
+        validate_pending_ticks(chunk, snapshot.next_tick_sequence)?;
         if previous.is_some_and(|value| value >= chunk.x) {
             return Err(SnapshotError(
                 "chunks must be unique and sorted by x".into(),
             ));
         }
         previous = Some(chunk.x);
+    }
+    Ok(())
+}
+
+fn validate_pending_ticks(
+    chunk: &ChunkSnapshot,
+    next_tick_sequence: u64,
+) -> Result<(), SnapshotError> {
+    let mut previous = None;
+    for tick in &chunk.pending_ticks {
+        if world_to_chunk(tick.position.global_x) != chunk.x {
+            return Err(SnapshotError(format!(
+                "chunk {} holds a pending tick for block {}",
+                chunk.x, tick.position.global_x
+            )));
+        }
+        if !(0..WORLD_HEIGHT).contains(&tick.position.y) {
+            return Err(SnapshotError(format!(
+                "chunk {} holds a pending tick outside the world height",
+                chunk.x
+            )));
+        }
+        if tick.sequence >= next_tick_sequence {
+            return Err(SnapshotError(format!(
+                "chunk {} holds pending tick sequence {}; the next sequence is {next_tick_sequence}",
+                chunk.x, tick.sequence
+            )));
+        }
+        if previous.is_some_and(|value| value >= tick.key()) {
+            return Err(SnapshotError(format!(
+                "chunk {} pending ticks must be unique and sorted",
+                chunk.x
+            )));
+        }
+        previous = Some(tick.key());
     }
     Ok(())
 }
@@ -131,6 +172,8 @@ pub fn blank_snapshot(
         created_at_unix_s: now_unix_s,
         last_played_unix_s: now_unix_s,
         day_time_ticks: crate::domain::SUNRISE_TICKS,
+        world_tick: 0,
+        next_tick_sequence: 0,
         player: PlayerSnapshot {
             chunk_x: (spawn.x.floor() as i64).div_euclid(i64::from(CHUNK_WIDTH)),
             local_x: spawn.x.rem_euclid(CHUNK_WIDTH as f32),

@@ -5,9 +5,9 @@ use sidecraft::{
         WorldRepository, WorldState, blank_snapshot, break_block, place_block, validate_snapshot,
     },
     domain::{
-        BlockState, CHUNK_WIDTH, ChunkLayer, DEPTH_SLICES, DayCycle, LightVolume, VoxelLayer,
-        VoxelPos, WORLD_HEIGHT, generate_chunk, generated_voxel, spawn_for_seed, surface_height,
-        world_to_chunk,
+        BlockState, CHUNK_WIDTH, ChunkLayer, DEPTH_SLICES, DayCycle, LightVolume, MutationPriority,
+        ScheduledTick, VoxelLayer, VoxelPos, WORLD_HEIGHT, generate_chunk, generated_voxel,
+        spawn_for_seed, surface_height, world_to_chunk,
     },
 };
 
@@ -56,10 +56,44 @@ fn new_world_edit_save_and_reload_lifecycle() {
     updated.player.y = spawn.y + 1.0;
     updated.player.selected_slot = 6;
     updated.chunks = world.snapshot_chunks();
+    updated.world_tick = 24_601;
+    updated.next_tick_sequence = 3;
+    let owed = [
+        ScheduledTick {
+            due_world_tick: 24_605,
+            priority: MutationPriority::PLAYER,
+            position: placed,
+            sequence: 1,
+            expected: Some(BlockState::WOOD),
+        },
+        ScheduledTick {
+            due_world_tick: 24_700,
+            priority: MutationPriority::PLAYER,
+            position: overlapping_backwall,
+            sequence: 2,
+            expected: None,
+        },
+    ];
+    updated
+        .chunks
+        .iter_mut()
+        .find(|chunk| chunk.x == 0)
+        .expect("the edited chunk is saved")
+        .pending_ticks = owed.to_vec();
     repository.save(&id, &updated).unwrap();
 
     let reloaded = repository.load(&id).unwrap();
     validate_snapshot(&reloaded).unwrap();
+    assert_eq!(reloaded.world_tick, 24_601);
+    assert_eq!(reloaded.next_tick_sequence, 3);
+    assert_eq!(
+        reloaded
+            .chunks
+            .iter()
+            .find(|chunk| chunk.x == 0)
+            .map(|chunk| chunk.pending_ticks.as_slice()),
+        Some(owed.as_slice())
+    );
     let reconstructed = WorldState::from_snapshot(&reloaded).state;
     assert_eq!(reconstructed.view().block(surface), None);
     assert_eq!(reconstructed.view().block(placed), Some(BlockState::WOOD));

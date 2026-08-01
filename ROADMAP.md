@@ -20,16 +20,22 @@ caves, water, plants, and technology progression of
 
 ## Resume here
 
-- Active item: none
-- Next item: M2.3 — SCW schema 6
+- Active item: M2.3 — SCW schema 6; implemented and locally verified, awaiting
+  manual real-GPU acceptance
+- Next item: M3.1 — clock and activation
 - Deferred item: M1.3 — add one local PowerShell quality-gate command
 - Blocker: none
 - Last completed work item: M2.2 streaming — added strict 3/5/7 activation,
   presentation, and retention bands; capacity-bounded nearest-first generation;
   complete result provenance; orphan draining; and deterministic integration
 - Verification baseline: confirmed 2026-08-01; formatting, Clippy with warnings
-  denied, 176 automated tests, the release build, and a deterministic real-GPU
-  gameplay capture passed locally
+  denied, 186 automated tests, the release build, and the scoped diff check
+  passed locally. The M2.3 real-GPU pass has not been run: launch a new world,
+  edit both layers, save, reload, and confirm the 75 existing schema-5 packages
+  in `worlds/` list as invalid instead of crashing or regenerating.
+- Known pre-existing lint debt outside the documented gate: three
+  `len_zero` Clippy warnings in `crates/sidecraft-texture-editor`
+  (`src/preview/scene.rs`), which only appear under `--workspace`.
 
 At the start of a work session, mark exactly one item `[~]`. At the end, change
 it to `[x]`, `[!]`, or `[ ]`, record the next concrete item here, and record any
@@ -151,25 +157,29 @@ local gates pass.
   Clippy with warnings denied, 176 tests, release build, scoped diff check, and
   a deterministic real-GPU gameplay capture.
 
-### M2.3 SCW schema 6
+### M2.3 SCW schema 6 `[~]`
 
-- `[ ]` Replace current save structs with one current-schema representation;
+- `[x]` Replace current save structs with one current-schema representation;
   do not keep version-suffixed legacy Rust types.
-- `[ ]` Require `SCW1` plus exact `schema_version = 6`.
-- `[ ]` Encode metadata, palettes, region references, and pending ticks with
+- `[x]` Require `SCW1` plus exact `schema_version = 6`.
+- `[x]` Encode metadata, palettes, region references, and pending ticks with
   Postcard, then compress SCW payloads with Zstandard.
-- `[ ]` Reserve dense code 0 for air and codes 1–255 for the per-region
+- `[x]` Reserve dense code 0 for air and codes 1–255 for the per-region
   non-air `BlockState` palette.
-- `[ ]` Store dense one-byte foreground and backwall arrays for each changed
+- `[x]` Store dense one-byte foreground and backwall arrays for each changed
   chunk.
-- `[ ]` Persist global `world_tick`, next tick sequence, player/day metadata,
+- `[x]` Persist global `world_tick`, next tick sequence, player/day metadata,
   generator version, and per-region pending ticks.
-- `[ ]` Write immutable content-addressed regions before atomically publishing
+- `[x]` Write immutable content-addressed regions before atomically publishing
   the manifest.
-- `[ ]` Serialize async save publication, coalesce requests, and reject stale
-  completion.
-- `[ ]` Reject wrong magic, schema, checksum, framing, compression, ordering,
+- `[x]` Serialize async save publication, coalesce requests, and reject stale
+  completion. `SaveCoordinator` already owned this; the dead random
+  `generation` manifest field was deleted rather than reinterpreted.
+- `[x]` Reject wrong magic, schema, checksum, framing, compression, ordering,
   palette, dimensions, or runtime values without fallback.
+- `[ ]` M2.3 verification: formatting, Clippy with warnings denied, 186 tests,
+  the release build, and the scoped diff check passed locally. Manual real-GPU
+  acceptance is still pending, so this item stays open.
 
 M2 is complete when both editable layers survive long-distance streaming and a
 fresh save/reload, unsupported worlds fail visibly, and interrupted/stale saves
