@@ -220,14 +220,24 @@ fn poll_save_job(
         }
         SaveDecision::Finish(destination) => {
             status.0 = "World saved".into();
+            info!(
+                world_revision = version.world_revision,
+                day_time_ticks = version.day_time_ticks,
+                destination = ?destination,
+                "world saved"
+            );
             finish_destination(destination, &mut next_state, &mut exits);
         }
         SaveDecision::Failed(destination) => {
-            status.0 = format!(
-                "Save failed{}",
-                result
-                    .err()
-                    .map_or(String::new(), |error| format!(": {error}"))
+            let reason = result
+                .err()
+                .map_or(String::new(), |error| format!(": {error}"));
+            status.0 = format!("Save failed{reason}");
+            error!(
+                world_revision = version.world_revision,
+                destination = ?destination,
+                reason = reason.trim_start_matches(": "),
+                "world save failed"
             );
             if destination != SaveDestination::Background {
                 next_state.set(AppState::Paused);

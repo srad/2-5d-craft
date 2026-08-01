@@ -111,12 +111,24 @@ pub(crate) struct SimulationClockResource(pub SimulationClock);
 #[derive(Resource, Default, Deref, DerefMut)]
 pub(crate) struct TickingAreasResource(pub Vec<TickingArea>);
 
-/// Presentation-only counters for the debug HUD. Never authoritative.
+/// Presentation-only counters for the debug HUD and session log. Never authoritative.
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SimulationDiagnostics {
     pub(crate) world_tick: u64,
     pub(crate) steps_last_frame: usize,
+    /// Highest step count any single frame reached since the world was entered.
+    ///
+    /// The HUD shows this rather than `steps_last_frame`, which reads zero on most frames at
+    /// normal frame rates: what acceptance needs to see is whether the four-step budget was ever
+    /// exceeded, not what the current frame happened to do.
+    pub(crate) max_steps_per_frame: usize,
     pub(crate) processed_last_frame: usize,
+    /// Scheduled ticks processed since the world was entered.
+    ///
+    /// Cumulative rather than per-frame because the log samples once per game second: work
+    /// drained on any other tick would be invisible, and a counter that reads zero while the
+    /// queue visibly shrinks is worse than no counter at all.
+    pub(crate) processed_total: u64,
     pub(crate) queued_ticks: usize,
     pub(crate) simulated_chunks: usize,
     pub(crate) ticking_areas: usize,

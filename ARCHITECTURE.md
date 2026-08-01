@@ -515,6 +515,44 @@ Avian continues to use its independently configured fixed physics schedule.
 Changing simulation TPS must not change player movement, collision, or camera
 behavior.
 
+## Logging
+
+Logging exists so a real run leaves evidence. Much of what milestone acceptance
+checks is behavioral rather than visual, and those claims must be verifiable
+from a recorded session instead of only witnessed live.
+
+Call sites use the `tracing` facade directly. There is no logger port: `tracing`
+is already a facade whose subscriber the binary selects, and wrapping it in a
+project trait would be a pass-through indirection. What is replaceable is the
+subscriber, and only the composition root chooses it.
+
+Responsibility by layer:
+
+- The domain logs nothing. Everything it could report is already a typed value
+  its caller receives.
+- The application logs only where it owns a decision with no caller to return
+  to. A new call site here usually means a typed return is missing.
+- Adapters do the logging. They are where the world is actually touched.
+- The composition root installs sinks and nothing else.
+
+Events are structured, not prose:
+
+- The message is a short, stable, lowercase identifier and is treated as one.
+  Everything variable is a typed field, never interpolated into the message.
+- Targets are module paths, so filters address real code and cannot drift.
+- No event fires once per frame. Periodic diagnostics sample on the logical
+  clock; lifecycle events fire on transitions only.
+- `info` is lifecycle, `debug` is periodic diagnostics and is off by default,
+  and `warn`/`error` are genuine anomalies.
+- An operation that returns a typed error does not also log it. Adapters log
+  successful completions, where there is no error channel to carry the fact.
+
+One `EnvFilter` governs every sink, so there is a single answer to why a line is
+missing; the file sink therefore cannot be more verbose than the console.
+Sessions are written as one JSON object per line to a per-session file, off the
+frame thread, with bounded retention. Logging never prevents the game from
+starting: an unusable log directory degrades to console-only output.
+
 ## Module and interface rules
 
 - A module has one primary responsibility and a narrow public surface.

@@ -20,29 +20,47 @@ caves, water, plants, and technology progression of
 
 ## Resume here
 
-- Active item: M3.1 — clock and activation
+- Active item: none
 - Next item: M3.2 — deterministic rule engine
 - Deferred item: M2.3 — SCW schema 6; implemented and locally verified, still
   awaiting its manual real-GPU acceptance pass. Returned to `[ ]` so exactly one
   item is active; M2 cannot be marked complete until that pass runs.
 - Deferred item: M1.3 — add one local PowerShell quality-gate command
 - Blocker: none
-- Last completed work item: M2.2 streaming — added strict 3/5/7 activation,
-  presentation, and retention bands; capacity-bounded nearest-first generation;
-  complete result provenance; orphan draining; and deterministic integration
+- Last completed work item: M3.1 clock and activation — an independent 20 TPS
+  nanosecond accumulator capped at four steps and 200 ms per frame, a
+  chunk-grouped scheduled-tick queue with a bounded per-chunk drain, activation
+  through `SimulationRegionProvider` with optional ticking areas, and session
+  logging that made the whole thing verifiable from a recording
 - Verification baseline: confirmed 2026-08-01; formatting, Clippy with warnings
-  denied, 219 workspace tests, the release build, and the scoped diff check
-  passed locally. Two real-GPU passes are outstanding:
-  - M2.3: launch a new world, edit both layers, save, reload, and confirm the
-    75 existing schema-5 packages in `worlds/` list as invalid instead of
-    crashing or regenerating.
-  - M3.1: with `SIDECRAFT_AUTOSTART` and `SIDECRAFT_TEST_SIMULATION_FIXTURE`
-    set, press `F3` and confirm the tick counter advances at roughly 20/s, the
-    spawn-chunk fixture work drains, the work four chunks away stays queued,
-    the counter freezes while paused and loading and resumes without a burst,
-    walking toward the frozen chunk drains it, and a save/reload restores the
-    tick and any remaining queued work. Movement, collision, and camera
-    behaviour must be unchanged.
+  denied, 233 workspace tests, the release build, and the scoped diff check
+  passed locally.
+- M3.1 behavioural acceptance is evidenced, not attested. A real-GPU session
+  under `SIDECRAFT_AUTOSTART`, `SIDECRAFT_TEST_SIMULATION_FIXTURE`, and
+  `SIDECRAFT_LOG=sidecraft=debug` recorded `world_tick` advancing 20 per
+  wall-clock second across 23 consecutive samples exactly 1.000 s apart,
+  `steps_last_frame` never above the budget of four, `processed_total` rising
+  0-1-2-3 while `queued_ticks` fell 6-5-4-3, and both then holding — the three
+  spawn-chunk ticks draining on schedule and the three four chunks away staying
+  frozen. The save published two chunks at `world_tick` 277 in 32 ms.
+- The `F3` overlay was verified by screenshot under `SIDECRAFT_DEBUG_OVERLAY`,
+  reading `tick 57 | peak steps 4/4 | processed 2 | queued 4 | active 7+0`
+  against a matching session log. Two defects surfaced only in a real session
+  and neither was reachable from tests: the overlay update system sat in no
+  `RuntimeSet`, so it raced `RuntimeSet::Simulation`; and it reported
+  `steps_last_frame`, which reads zero on most frames at normal frame rates and
+  made a working clock look stopped. It now reports a high-water mark.
+- One real-GPU pass remains outstanding, from M2.3: launch a new world, edit
+  both layers, save, reload, and confirm the 75 existing schema-5 packages in
+  `worlds/` list as invalid instead of crashing or regenerating.
+- Note for future overlay work: the HUD carries
+  `DespawnOnExit(AppState::Playing)`, so the debug overlay is absent while
+  paused. Compare the tick before `Escape` against the tick after resuming
+  rather than expecting to watch it freeze.
+- Follow-up: scripted acceptance runs. Gameplay input already flows through
+  `Res<ButtonInput<KeyCode>>`, so timed synthetic input plus an auto-exit could
+  drive pause/resume, walk-to-thaw, and save/reload unattended and leave the
+  whole behavioural pass in the session log.
 - Known pre-existing lint debt outside the documented gate: three
   `len_zero` Clippy warnings in `crates/sidecraft-texture-editor`
   (`src/preview/scene.rs`), which only appear under `--workspace`.
@@ -197,7 +215,7 @@ cannot replace the last valid manifest.
 
 ## M3 — Deterministic living-world simulation `[ ]`
 
-### M3.1 Clock and activation `[~]`
+### M3.1 Clock and activation `[x]`
 
 - `[x]` Add an independent 20 TPS simulation clock without changing Bevy's
   fixed clock or Avian physics schedule. The clock accumulates whole
@@ -216,9 +234,11 @@ cannot replace the last valid manifest.
 - `[x]` Add an `F3` top-left debug overlay and a `SIDECRAFT_TEST_SIMULATION_FIXTURE`
   seed, because a clock with no rules is otherwise invisible to manual
   acceptance.
-- `[ ]` M3.1 verification: formatting, Clippy with warnings denied, 219
+- `[x]` M3.1 verification: formatting, Clippy with warnings denied, 233
   workspace tests, the release build, and the scoped diff check passed locally.
-  Manual real-GPU acceptance is still pending, so this item stays open.
+  Real-GPU acceptance is evidenced by session logs and an overlay screenshot
+  rather than attested; pause, activation, and persistence behaviour are
+  additionally covered headlessly.
 
 ### M3.2 Deterministic rule engine
 
@@ -426,6 +446,10 @@ engine form a coherent living-builder loop.
 - `[ ]` Add fluid surfaces, falling-block interpolation, plant animation,
   weather effects, and broader environmental particles; mining, placement,
   pickup, and crafting feedback belongs to M4.
+- `[x]` Add per-session JSON session logging with one `EnvFilter` over a console
+  and an off-thread file sink, bounded retention, and a layer rule that keeps
+  the domain silent and sinks at the composition root, so behavioural
+  acceptance is recorded rather than only witnessed.
 - `[ ]` Add music, ambient sound, interaction audio, and volume controls.
 - `[ ]` Improve rebinding, controller support, accessibility, and UI scaling.
 - `[ ]` Profile generation, simulation, mesh rebuilding, lighting, saving, and

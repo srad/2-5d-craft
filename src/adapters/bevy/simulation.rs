@@ -76,11 +76,31 @@ fn advance_simulation(
     let regions = PlayerSimulationRegions::new(window.0, areas.0.clone());
     let steps = run_simulation(world, &mut clock.0, &regions, time.delta_secs_f64());
     diagnostics.steps_last_frame = steps.len();
+    diagnostics.max_steps_per_frame = diagnostics.max_steps_per_frame.max(steps.len());
     diagnostics.processed_last_frame = steps.iter().map(|step| step.processed.len()).sum();
+    diagnostics.processed_total += diagnostics.processed_last_frame as u64;
     diagnostics.world_tick = world.world_tick();
     diagnostics.queued_ticks = world.queued_ticks();
     diagnostics.simulated_chunks = window.simulation_chunks().count();
     diagnostics.ticking_areas = areas.0.len();
+
+    // Sampled on the logical clock, never per frame: one line per game second regardless of
+    // frame rate. `steps_last_frame` is the frame that crossed the boundary, which is what makes
+    // the four-step budget checkable from the log.
+    if steps
+        .iter()
+        .any(|step| step.world_tick.is_multiple_of(SIMULATION_TICKS_PER_SECOND))
+    {
+        debug!(
+            world_tick = diagnostics.world_tick,
+            steps_last_frame = diagnostics.steps_last_frame,
+            processed_total = diagnostics.processed_total,
+            queued_ticks = diagnostics.queued_ticks,
+            simulated_chunks = diagnostics.simulated_chunks,
+            ticking_areas = diagnostics.ticking_areas,
+            "simulation step"
+        );
+    }
 }
 
 /// Seeds observable work for the manual acceptance pass: some in the spawn chunk, which drains,
@@ -114,7 +134,13 @@ fn seed_simulation_fixture(
             if let Err(rejection) =
                 world.schedule_tick(position, MutationPriority::PLAYER, due, None)
             {
-                warn!("simulation fixture could not schedule work: {rejection:?}");
+                warn!(
+                    chunk_x,
+                    global_x = position.global_x,
+                    due_world_tick = due,
+                    reason = ?rejection,
+                    "simulation fixture work rejected"
+                );
             }
         }
     }
@@ -183,6 +209,42 @@ mod tests {
         app.world().resource::<WorldStateResource>().world_tick()
     }
 
+    /// A real session showed `processed_last_frame` reading zero on every logged line: work
+    /// drained on ticks the once-per-second sample never lands on. The cumulative counter is what
+    /// the log and HUD report, so it must survive frames that process nothing.
+    #[test]
+    fn processed_work_accumulates_across_frames_that_drain_nothing() {
+        let mut app = app();
+        enter_world(&mut app);
+        let position = VoxelPos::foreground(0, WORLD_HEIGHT / 2);
+        let scheduled = app
+            .world_mut()
+            .resource_mut::<WorldStateResource>()
+            .schedule_tick(position, MutationPriority::PLAYER, 2, None)
+            .unwrap();
+
+        // Tick 1 drains nothing; tick 2 drains the scheduled work.
+        advance(&mut app, SECONDS_PER_STEP);
+        assert_eq!(
+            app.world()
+                .resource::<SimulationDiagnostics>()
+                .processed_total,
+            0
+        );
+        advance(&mut app, SECONDS_PER_STEP);
+
+        let diagnostics = *app.world().resource::<SimulationDiagnostics>();
+        assert_eq!(diagnostics.processed_total, 1);
+        assert_eq!(diagnostics.queued_ticks, 0);
+
+        // It stays counted on later frames that process nothing.
+        advance(&mut app, SECONDS_PER_STEP * 3.0);
+        let later = *app.world().resource::<SimulationDiagnostics>();
+        assert_eq!(later.processed_total, 1);
+        assert_eq!(later.processed_last_frame, 0);
+        assert_eq!(scheduled.due_world_tick, 2);
+    }
+
     #[test]
     fn logical_time_advances_only_while_playing() {
         let mut app = app();
@@ -213,10 +275,17 @@ mod tests {
             world_tick(&app),
             u64::from(crate::domain::MAX_STEPS_PER_FRAME)
         );
+        let diagnostics = *app.world().resource::<SimulationDiagnostics>();
+        assert_eq!(
+            diagnostics.steps_last_frame,
+            crate::domain::MAX_STEPS_PER_FRAME as usize
+        );
+        // The HUD reports the high-water mark, which must survive later quiet frames.
+        advance(&mut app, 0.0);
         assert_eq!(
             app.world()
                 .resource::<SimulationDiagnostics>()
-                .steps_last_frame,
+                .max_steps_per_frame,
             crate::domain::MAX_STEPS_PER_FRAME as usize
         );
     }

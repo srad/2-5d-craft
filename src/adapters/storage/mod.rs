@@ -229,7 +229,18 @@ impl ScwRepository {
                 "world save path must be a package directory".into(),
             ));
         }
-        save_package(&path, save)
+        // Only the success is logged. Every failure above and inside is a typed `StoreError`
+        // returned to a caller that decides whether it is worth reporting.
+        let started = std::time::Instant::now();
+        save_package(&path, save)?;
+        tracing::info!(
+            world_id = id.as_str(),
+            chunks = save.chunks.len(),
+            world_tick = save.world_tick,
+            duration_ms = started.elapsed().as_millis() as u64,
+            "package published"
+        );
+        Ok(())
     }
 
     fn load(&self, id: &WorldId) -> Result<WorldSnapshot, StoreError> {

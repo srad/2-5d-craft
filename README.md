@@ -44,6 +44,30 @@ The first build is large because Bevy's rendering stack must be compiled.
 Worlds are stored under `worlds/` relative to the working directory.
 The global texture-pack selection is stored in schema-1 `sidecraft.toml`.
 
+### Logging
+
+Each run writes `logs/sidecraft-<unix_seconds>.jsonl`, one JSON object per line,
+off the frame thread; the ten newest sessions are kept. Console output is
+unchanged. Because the log records typed fields rather than prose, a session can
+be checked after the fact instead of watched live.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SIDECRAFT_LOG` | `sidecraft=info` | Filter directives, appended to Bevy's renderer-suppression defaults |
+| `SIDECRAFT_LOG_DIR` | `logs` | Session directory; `off` disables file logging |
+| `SIDECRAFT_DEBUG_OVERLAY` | unset | Start with the `F3` overlay already shown |
+
+Periodic diagnostics such as the simulation summary are `debug`, so they are off
+unless requested:
+
+```powershell
+$env:SIDECRAFT_LOG="sidecraft=debug"; cargo run
+```
+
+One filter governs both sinks, so the file cannot be more verbose than the
+console. A log directory that cannot be written degrades to console-only output
+rather than failing the launch.
+
 ### Controls
 
 | Input | Action |

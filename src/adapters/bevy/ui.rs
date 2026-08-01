@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use crate::{
     AppState,
     adapters::bevy::{
-        SimulationDebugVisible, SimulationDiagnostics,
+        RuntimeSet, SimulationDebugVisible, SimulationDiagnostics, environment_flag,
         interaction::ActiveVoxelLayer,
         player::{Hotbar, Player},
         rendering::RenderCatalog,
@@ -103,7 +103,11 @@ pub struct GameUiPlugin;
 impl Plugin for GameUiPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<UiStatus>()
-            .init_resource::<SimulationDebugVisible>()
+            // Acceptance runs need the overlay without a keypress, so a screenshot can be
+            // compared against the session log.
+            .insert_resource(SimulationDebugVisible(environment_flag(
+                "SIDECRAFT_DEBUG_OVERLAY",
+            )))
             .add_systems(OnEnter(AppState::LoadingWorld), spawn_loading_screen)
             .add_systems(OnEnter(AppState::Saving), spawn_saving_screen)
             .add_systems(OnEnter(AppState::Playing), (resume_physics, spawn_hud))
@@ -119,10 +123,16 @@ impl Plugin for GameUiPlugin {
                     update_status_text,
                     update_hotbar.run_if(in_state(AppState::Playing)),
                     update_active_layer_text.run_if(in_state(AppState::Playing)),
-                    (toggle_simulation_debug, update_simulation_debug_text)
-                        .chain()
-                        .run_if(in_state(AppState::Playing)),
                 ),
+            )
+            // Derived presentation: the overlay reports the tick the simulation just advanced, so
+            // it must be ordered after `RuntimeSet::Simulation` rather than race it.
+            .add_systems(
+                Update,
+                (toggle_simulation_debug, update_simulation_debug_text)
+                    .chain()
+                    .in_set(RuntimeSet::Derived)
+                    .run_if(in_state(AppState::Playing)),
             );
         menus::register(app);
     }
@@ -593,10 +603,10 @@ fn update_simulation_debug_text(
 
 fn simulation_debug_label(diagnostics: &SimulationDiagnostics) -> String {
     format!(
-        "tick {} | steps {} | processed {} | queued {} | active {}+{} [F3]",
+        "tick {} | peak steps {}/4 | processed {} | queued {} | active {}+{} [F3]",
         diagnostics.world_tick,
-        diagnostics.steps_last_frame,
-        diagnostics.processed_last_frame,
+        diagnostics.max_steps_per_frame,
+        diagnostics.processed_total,
         diagnostics.queued_ticks,
         diagnostics.simulated_chunks,
         diagnostics.ticking_areas,

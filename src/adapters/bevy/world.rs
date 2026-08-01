@@ -210,6 +210,15 @@ fn spawn_pending_world(
     )));
     commands.insert_resource(WorldPresentation::default());
     commands.insert_resource(WorldDirtySets::default());
+    info!(
+        world_id = pending.id.as_str(),
+        seed = pending.snapshot.seed,
+        world_tick = pending.snapshot.world_tick,
+        day_time_ticks = pending.snapshot.day_time_ticks,
+        saved_chunks = pending.snapshot.chunks.len(),
+        center_chunk,
+        "world entered"
+    );
     mutations.write(WorldMutationMessage {
         session_instance: instance_id,
         report: initialized.report,
@@ -448,7 +457,11 @@ fn poll_generation_tasks(
             .contains_chunk(ChunkLayer::foreground(result.request.global_chunk_x));
         if !result_is_still_requested(&task_request, &result, identity, window.0, already_loaded) {
             if malformed {
-                warn!("discarding malformed chunk generation result");
+                warn!(
+                    chunk_x = result.request.global_chunk_x,
+                    payload_chunk_x = result.chunk.x(),
+                    "chunk result discarded"
+                );
             }
             continue;
         }
