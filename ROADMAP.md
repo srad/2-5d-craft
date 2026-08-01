@@ -50,6 +50,14 @@ from code inspection alone.
   bounded ticking areas.
 - Performance matters, but deterministic serial behavior is the reference
   before parallel optimization.
+- Builder progression uses direct real-time mining, finite item stacks, a
+  nine-slot hotbar, and Minecraft-style 2x2 personal and 3x3 station crafting
+  grids with a recipe book.
+- Inventory and station overlays leave the single-player world running while
+  capturing movement and gameplay commands.
+- Mining, placement, pickup, and crafting animation, particles, feedback, and
+  core-block visual quality are part of each M4 gameplay slice, not deferred
+  cleanup in M6.
 - Prototype saves and internal APIs have no compatibility guarantee. Old
   implementations are deleted rather than migrated.
 - Verification is local. The project does not use GitHub Actions or another
@@ -229,18 +237,100 @@ activation, persistence, overload, and physics-clock independence.
 
 ## M4 — Builder progression `[ ]`
 
-- `[ ]` Add finite inventory stacks and world item drops.
-- `[ ]` Consume blocks on placement and generate data-driven drops on mining.
-- `[ ]` Add replaceable data-driven recipes and crafting stations.
-- `[ ]` Add tool tiers, mining suitability, durability, and repair/replacement
-  loops.
-- `[ ]` Add workbench and furnace processing using scheduled simulation work.
-- `[ ]` Persist inventory, equipment, stations, and processing state in a new
-  exact save schema; invalidate schema 5 rather than migrating it.
-- `[ ]` Test complete gather, craft, place, save, and reload journeys.
+### M4.1 Wood-and-stone vertical slice
 
-M4 is complete when a new player can gather resources, improve tools, build a
-home, process materials, and resume that progression after reload.
+- `[ ]` Replace the infinite block catalog with a nine-slot hotbar, 27-slot
+  inventory, finite 64-item stacks, unstackable tools, world drops, item
+  pickup, and consumption on accepted placement.
+- `[ ]` Start new players empty-handed without granting starter items or
+  guaranteeing nearby wood; deliberately poor starts remain valid worlds.
+- `[ ]` Add dirt, logs, planks, cobblestone, workbenches, torches, coal, raw
+  iron, sticks, and wooden/stone pickaxes and axes as the initial item set.
+- `[ ]` Make grass drop dirt, stone drop cobblestone, coal ore drop coal, iron
+  ore drop raw iron, leaves drop nothing, and supported torches and crafted
+  blocks drop themselves. Player-placed dirt remains dirt until M3 grass rules
+  change it.
+- `[ ]` Add a strictly validated, checked-in schema-1 gameplay catalog for
+  item limits, mining hardness, preferred tools, harvest tiers, drops, fuel,
+  repair, and recipes; it is internal game data, not a public mod surface.
+- `[ ]` Add exact log-to-planks, planks-to-sticks, 2x2 workbench, standard
+  three-material/two-stick pickaxe and mirrored-axe, and coal-over-stick torch
+  recipes.
+- `[ ]` Add a personal 2x2 grid and contextual-`E` 3x3 workbench grid with all
+  recipes visible from the start, manual placement, recipe filling, atomic
+  output collection, and lossless cursor/grid close behavior.
+- `[ ]` Keep inventory overlays inside `Playing`: simulation, day time,
+  physics, drop aging, pickup, and visual effects continue while movement,
+  mining, placement, layer switching, and hotbar input are captured.
+- `[ ]` Add wooden and stone tool suitability with 64 and 128 durability.
+  Blocks with no harvest requirement still drop by hand; rock mined without
+  the required pickaxe class/tier breaks slowly, warns visibly, and yields no
+  resource.
+- `[ ]` Tune early correct-tool mining to roughly 0.5–0.85 seconds, logs to
+  roughly 1.2 seconds by hand and 0.3–0.5 seconds with an axe, and unsuitable
+  rock mining to roughly 3–4 seconds.
+- `[ ]` Add deterministic foreground world-drop gravity, stable merging and
+  pickup ordering, backwall-to-foreground projection, placement-safe
+  relocation, and expiry after 6,000 active simulation ticks. Inactive chunks
+  freeze drop work.
+- `[ ]` Add held-item/tool presentation, synchronized mining swings, ten crack
+  stages, target recoil, impact and break particles, placement feedback, item
+  pop/fall/bob/pickup motion, crafting pulses, stack counts, durability bars,
+  and suitability warnings.
+- `[ ]` Preserve cubic natural terrain while adding richer face-specific
+  variants and restrained special geometry for the workbench. Transient
+  effects use the active 16x16 atlas and sampled voxel light without changing
+  propagated lighting.
+- `[ ]` Replace texture-pack, texture-project, and texture-generator version 1
+  directly with version 2; add block-item, material-item, and tool icons and
+  update the default pack, generator, editor, previews, and shared showcase
+  together. Schema-2 partial packs retain per-asset fallback to the default.
+- `[ ]` Replace SCW schema 6 directly with exact schema 7, adding player
+  inventory, selected slot, tool durability, transient crafting stacks,
+  region-local drops and pending work, the next drop sequence, and all
+  authoritative save revisions.
+- `[ ]` Test the complete empty-hand gather, craft, equip, mine, build, save,
+  and reload journey plus open-grid saves, full inventories, both editable
+  layers, streaming, and stale async-save completion.
+
+### M4.2 Furnace-and-iron progression
+
+- `[ ]` Add a furnace crafted from eight cobblestone with one input, one fuel,
+  and one output slot, accessible through contextual `E` on either editable
+  layer.
+- `[ ]` Smelt raw iron into iron ingots in 200 active simulation ticks. Coal
+  processes eight items; one log or plank processes one item.
+- `[ ]` Add iron pickaxes and axes with 256 durability.
+- `[ ]` Add workbench material repair: one matching tier material restores 25
+  percent of maximum durability without exceeding the maximum.
+- `[ ]` Run furnace progress entirely through M3 scheduled work. Pause,
+  loading, saving, inactive chunks, and process downtime do not advance it;
+  blocked output pauses without consuming further input.
+- `[ ]` Breaking a furnace always releases its stored contents, while the
+  furnace block itself drops only when harvested with a suitable pickaxe.
+- `[ ]` Add active-face animation, smoke, embers, and processing feedback
+  without changing propagated block light.
+- `[ ]` Replace schema 7 directly with exact schema 8, adding sorted
+  region-local station slots, fuel, progress, and scheduled work; delete the
+  schema-7 reader and tests.
+- `[ ]` Test active/inactive processing, blocked outputs, station destruction,
+  station loss while open, both layers, save/reload, and stale completion.
+
+### M4.3 Progression hardening
+
+- `[ ]` Tune resource density, hardness, tool speed, durability, recipe costs,
+  inventory friction, drop cleanup, and station timing through complete play
+  sessions.
+- `[ ]` Stress large drop populations, station backlogs, rapid inventory
+  actions, streaming reversals, floating-origin rebasing, and schema limits.
+- `[ ]` Run fixed-seed automated journeys and real-GPU manual journeys through
+  gather, craft, equip, mine, build, process, repair, save, and reload.
+- `[ ]` Complete manual visual and gameplay acceptance; functional tests alone
+  cannot establish that the loop is enjoyable.
+
+M4 is complete when the gather/craft/build/process loop is finite, lossless,
+persistent, visually coherent, and manually judged enjoyable across both
+editable layers.
 
 ## M5 — Ecology and exploration `[ ]`
 
@@ -295,10 +385,12 @@ engine form a coherent living-builder loop.
   package; all workspace gates, the release build, and a real-GPU launch pass,
   but manual editor visual acceptance remains pending because the hidden
   hardware surface could not be captured through the Windows compositor.
-- `[ ]` Add further material-specific face variation and restrained block
-  silhouette cues without smoothing the pixel-art aesthetic.
+- `[ ]` Extend M4's material-specific face and restrained silhouette language
+  to later ecology, exploration, and technology content without smoothing the
+  pixel-art aesthetic.
 - `[ ]` Add fluid surfaces, falling-block interpolation, plant animation,
-  particles, weather effects, and responsive interaction feedback.
+  weather effects, and broader environmental particles; mining, placement,
+  pickup, and crafting feedback belongs to M4.
 - `[ ]` Add music, ambient sound, interaction audio, and volume controls.
 - `[ ]` Improve rebinding, controller support, accessibility, and UI scaling.
 - `[ ]` Profile generation, simulation, mesh rebuilding, lighting, saving, and

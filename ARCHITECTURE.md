@@ -144,7 +144,9 @@ struct BlockState {
 
 ## Presentation contract
 
-- Gameplay, collision, movement, targeting, and placement remain on depth 0.
+- Player movement and collision remain on depth 0. Targeting, mining, and
+  placement may select the editable foreground at depth 0 or non-colliding
+  backwall at depth 1; depths 2 through 5 remain render-only.
 - A fixed orthographic camera looks at depth 0 with 10 degrees of horizontal
   yaw and 14 degrees of downward pitch. Camera setup, following, recentering,
   and floating-origin rebasing must share the same transform construction.
@@ -214,6 +216,92 @@ struct BlockState {
   Its camera framing and fixed-noon presentation state are isolated from the
   saved gameplay camera and day cycle. Loading keeps the showcase; Saving
   retains the actual world behind its overlay.
+
+M4 interaction presentation follows the same separation:
+
+- Mining cracks, target recoil, held-item motion, chips, break and placement
+  particles, item interpolation, pickup motion, and crafting pulses are
+  presentation only. They never change blocks, inventories, drops, stations,
+  simulation queues, or propagated lighting.
+- Completion effects consume typed accepted action or rule outcomes. Raw cell
+  changes are insufficient because integration, unloading, simulation
+  movement, and replacement mutations must not appear as player actions.
+- Transient interaction effects use a bounded reusable pool. Exhaustion may
+  recycle only cosmetic effects; authoritative world drops are never pooled or
+  discarded by presentation limits.
+- Natural terrain keeps a cubic silhouette. Crafted and special blocks may
+  use restrained chunk-batched geometry while retaining full-cell collision,
+  opacity, whole-face light coordinates, and ambient occlusion.
+- Texture-pack schema 2 adds current block-item, material-item, and tool
+  visuals. Partial current-schema packs may fall back per asset, but schema-1
+  packs and projects are rejected rather than adapted.
+
+## Items, inventory, crafting, and stations
+
+M4 introduces Bevy-free `ItemId`, `ItemStack`, `Inventory`, `ToolClass`,
+`ToolTier`, `Recipe`, `CraftingGrid`, `DropId`, `WorldDrop`, and
+`GameplayCatalog` domain types.
+
+- The composition root embeds checked-in schema-1 gameplay TOML and validates
+  it into an immutable catalog before entering a world. This catalog is
+  internal content data, not a runtime mod API.
+- Render and lighting properties remain in the block definition. Item limits,
+  mining hardness, preferred tools, harvest tiers, drops, fuel, repair, and
+  recipes belong to the gameplay catalog.
+- Catalog validation rejects duplicate or invalid IDs and slugs, dangling
+  references, invalid stack limits or durability, malformed recipes, invalid
+  counts, and missing block/item visual mappings.
+- The application owns the single-player inventory, selected hotbar slot,
+  crafting session, world-drop store, and station store. Bevy resources are
+  thin wrappers around those types; UI components are never authoritative.
+- `BlockState::HOTBAR`, `BlockId::HOTBAR`, block `hotbar_slot` metadata, and the
+  infinite Bevy hotbar are deleted when the finite inventory arrives. No
+  compatibility aliases remain.
+
+Player actions are atomic across their authoritative owners:
+
+- One application action owner prevalidates the selected stack, inventory,
+  station, target, reach, layer, and expected block state.
+- It commits the voxel proposal through `WorldMutator` and performs item
+  consumption, durability, station, and drop side effects only after the
+  proposal is accepted. Those post-commit operations are infallible because
+  the same owner retains exclusive mutable access for the whole action.
+- Rejected placement consumes nothing. A final durability point still
+  completes an accepted break and its harvest before the tool is removed.
+- Crafting first simulates the complete cursor/grid/inventory transfer, then
+  commits it as one inventory transaction. Failed recipe fill, output
+  collection, repair, or close leaves every slot unchanged.
+- Typed action and simulation outcomes carry accepted side effects. Loot is
+  never inferred from `MutationReport`: player harvest, support-removal torch
+  drops, station contents, block movement, and fluid replacement have distinct
+  causes and drop policies.
+
+The inventory overlay remains inside `AppState::Playing`. It captures player
+movement and gameplay commands, clears mining state, and owns pointer input,
+while day time, Avian physics, M3 simulation, item aging, automatic pickup, and
+presentation continue. Outside an overlay, `E` opens personal crafting or the
+targeted in-reach workbench/furnace; inside an overlay, `E` closes it. `Escape`
+closes the overlay before a second press may pause. A workbench or furnace is
+revalidated against the current player position and block state. If it
+disappears or leaves reach, grid and cursor stacks are returned atomically and
+the UI falls back to
+personal crafting; genuine overflow becomes a foreground drop with a pickup
+delay.
+
+World drops are deterministic simulation state:
+
+- Each drop has a stable ID, validated stack, global foreground cell anchor,
+  pickup delay, and remaining active lifetime. Backwall actions project their
+  collectible drops to the foreground while keeping visual effects at the
+  source depth.
+- M3 scheduled work moves unsupported drops downward one cell at a time,
+  merges identical compatible stacks in stable order, and expires them after
+  6,000 active ticks. Inactive chunks freeze this work.
+- Placement never consumes or silently deletes a drop. A stable bounded search
+  relocates a covered anchor; if no free cell exists, the authoritative record
+  remains collectible.
+- Bevy drop entities interpolate pop, fall, bob, attraction, and pickup around
+  the authoritative anchor. Avian entities never own item position or expiry.
 
 ## World mutation boundary
 
@@ -316,9 +404,9 @@ inputs, and performs one deterministic merge before committing.
   mutation commit and a whole presentation-clock tick.
 - One save coordinator serializes publication, coalesces queued requests, and
   prevents an older completion from replacing a newer manifest.
-- An escalated pause/exit save completes only when both the block revision and
-  absolute day tick still equal the version captured in the completed
-  snapshot.
+- The save version covers every authoritative block, simulation, inventory,
+  drop, station, and day revision. An escalated pause/exit save completes only
+  when the full version still equals the completed snapshot.
 
 ## SCW persistence
 
@@ -348,6 +436,25 @@ M2.3 replaces this prototype layout with exact schema version 6, adding
 `world_tick`, the next tick sequence, and region-local pending scheduled ticks.
 Schema 5 will be invalidated rather than migrated.
 
+M4.1 replaces schema 6 with exact schema 7. Player metadata gains the 36 fixed
+inventory slots, selected slot, durability, and transient crafting/cursor
+stacks. Regions gain sorted world drops and their pending work, and the
+manifest gains the next drop sequence plus all authoritative revisions. A
+region exists when it contains drops or scheduled work even if its generated
+blocks are unchanged.
+
+Background saves may snapshot an open crafting session exactly. Loading
+normalizes transient grid/cursor stacks back into inventory; overflow becomes
+world drops and the normalization emits an initial dirty report so it is saved.
+Pause, main-menu, and exit transitions close and normalize the overlay before
+capturing their escalated snapshot.
+
+M4.2 replaces schema 7 with exact schema 8. Regions additionally store sorted
+station positions, slots, fuel, processing progress, and scheduled work. A
+station record without its matching block is invalid. Both schemas reject
+unknown item IDs, invalid counts or durability, duplicate drop IDs, invalid
+anchors or lifetimes, bad ordering, and malformed or stale pending work.
+
 Magic, schema, framing, decompression, palette, dimensions, ordering, checksum,
 and runtime fields are validated before data enters the domain. Invalid or
 incompatible data produces a visible typed error. It is never silently
@@ -360,11 +467,13 @@ The application schedule preserves this order:
 1. Advance the 20 TPS presentation clock while `Playing`.
 2. Accept completed load/generation tasks.
 3. Translate input and UI actions into application commands.
-4. Commit external world commands.
-5. Advance zero or more independent world-simulation ticks.
-6. Dispatch mutation and daylight changes into adapter dirty sets.
-7. Rebuild lighting, meshes, and colliders from authoritative data.
-8. Capture or queue save snapshots.
+4. Commit player inventory, crafting, station, and external world actions.
+5. Apply automatic pickups after explicit player actions.
+6. Advance zero or more independent world-simulation ticks.
+7. Dispatch accepted mutations, side effects, and daylight changes.
+8. Rebuild lighting, meshes, colliders, and presentation effects from
+   authoritative data and typed outcomes.
+9. Capture or queue immutable save snapshots.
 
 The presentation clock stores absolute ticks, wraps its visual phase every
 24,000 ticks, and advances moon phase every day. A discrete skylight-level

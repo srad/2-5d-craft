@@ -51,7 +51,7 @@ The global texture-pack selection is stored in schema-1 `sidecraft.toml`.
 | Left mouse, held | Mine the targeted block |
 | Right mouse | Place the selected block |
 | `Tab` | Toggle foreground/backwall editing |
-| `1` through `8` | Select a hotbar block |
+| `1` through `7` | Select a hotbar block |
 | `Escape` | Pause or resume |
 | `F12` | Save a gameplay screenshot |
 
