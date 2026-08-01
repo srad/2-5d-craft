@@ -5,8 +5,9 @@ use sidecraft::{
         WorldRepository, WorldState, blank_snapshot, break_block, place_block, validate_snapshot,
     },
     domain::{
-        BlockState, ChunkLayer, DEPTH_SLICES, DayCycle, LightVolume, VoxelLayer, VoxelPos,
-        WORLD_HEIGHT, generated_voxel, spawn_for_seed, surface_height, world_to_chunk,
+        BlockState, CHUNK_WIDTH, ChunkLayer, DEPTH_SLICES, DayCycle, LightVolume, VoxelLayer,
+        VoxelPos, WORLD_HEIGHT, generate_chunk, generated_voxel, spawn_for_seed, surface_height,
+        world_to_chunk,
     },
 };
 
@@ -97,4 +98,41 @@ fn new_world_edit_save_and_reload_lifecycle() {
     let cycle = DayCycle::from_ticks(reloaded.day_time_ticks);
     assert!((0.0..=1.0).contains(&cycle.daylight()));
     assert!((4..=15).contains(&cycle.sky_light_level()));
+}
+
+#[test]
+fn distant_edits_survive_unload_save_reload_and_revisit() {
+    let directory = tempfile::tempdir().unwrap();
+    let repository = ScwRepository::new(directory.path());
+    let seed = 0x0D15_7A17;
+    let id = repository.next_available_id(seed).unwrap();
+    let spawn = spawn_for_seed(seed);
+    let mut snapshot = blank_snapshot(seed, "Streaming world".into(), Vec::new(), spawn, 1);
+    let mut world = WorldState::from_snapshot(&snapshot).state;
+
+    let origin = VoxelPos::foreground(0, surface_height(seed, 0));
+    break_block(&mut world, origin).unwrap();
+    place_block(&mut world, origin, BlockState::WOOD).unwrap();
+
+    let far_chunk_x = 20;
+    let far_x = far_chunk_x * i64::from(CHUNK_WIDTH);
+    world.integrate_chunk(generate_chunk(seed, far_chunk_x));
+    let distant = VoxelPos::foreground(far_x, surface_height(seed, far_x));
+    break_block(&mut world, distant).unwrap();
+    place_block(&mut world, distant, BlockState::DIRT).unwrap();
+    world.unload_chunk(far_chunk_x);
+
+    snapshot.player.chunk_x = far_chunk_x;
+    snapshot.player.local_x = 0.0;
+    snapshot.chunks = world.snapshot_chunks();
+    repository.save(&id, &snapshot).unwrap();
+
+    let reloaded = repository.load(&id).unwrap();
+    validate_snapshot(&reloaded).unwrap();
+    let mut revisited = WorldState::from_snapshot(&reloaded).state;
+    assert_eq!(revisited.view().block(distant), Some(BlockState::DIRT));
+
+    let origin_chunk = revisited.persisted_chunk(0).unwrap();
+    revisited.integrate_chunk(origin_chunk);
+    assert_eq!(revisited.view().block(origin), Some(BlockState::WOOD));
 }

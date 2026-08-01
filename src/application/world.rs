@@ -293,6 +293,7 @@ mod tests {
         let mut world = world();
         world.rebase(8);
         let session = WorldSession {
+            instance_id: crate::application::SessionInstanceId::new(1),
             id: WorldId::new("test").unwrap(),
             name: "Test".into(),
             seed: 11,

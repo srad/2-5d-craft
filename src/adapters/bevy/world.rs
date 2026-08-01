@@ -10,6 +10,7 @@ use crate::{
     AppState,
     adapters::bevy::{
         DayCycleResource, LightVolumeResource, PendingWorldResource, RuntimeSet,
+        SessionInstanceCounterResource, StreamConfigResource, StreamWindowResource,
         WorldSessionResource, WorldStateResource,
         camera::{CameraRig, GameCamera, center_camera},
         environment_flag,
@@ -18,11 +19,12 @@ use crate::{
         rendering::{RenderCatalog, build_chunk_collider, build_chunk_meshes},
     },
     application::{
-        SaveVersion, StreamConfig, WorldId, WorldSession, WorldState, place_block,
-        plan_generation_requests, plan_unloads, result_is_still_requested,
+        GenerationIdentity, GenerationRequest, GenerationResult, SaveVersion, StreamWindow,
+        WorldSession, WorldState, place_block, plan_generation_requests, plan_unloads,
+        result_is_still_requested,
     },
     domain::{
-        BlockChunk, BlockState, CHUNK_WIDTH, ChunkChange, ChunkLayer, DEPTH_SLICES, LightVolume,
+        BlockState, CHUNK_WIDTH, ChunkChange, ChunkLayer, DEPTH_SLICES, LightVolume,
         MAX_LIGHT_LEVEL, MutationReport, TorchMount, VoxelLayer, VoxelPos, WORLD_HEIGHT,
         generate_chunk_at, generated_voxel, world_to_chunk,
     },
@@ -61,7 +63,7 @@ struct WorldDirtySets {
 
 #[derive(Message, Debug, Clone)]
 pub(crate) struct WorldMutationMessage {
-    pub(crate) world_id: WorldId,
+    pub(crate) session_instance: crate::application::SessionInstanceId,
     pub(crate) report: MutationReport,
 }
 
@@ -73,9 +75,31 @@ struct RetiredMeshAssets {
 
 #[derive(Component)]
 struct ChunkGenerationTask {
-    chunk_x: i64,
-    origin_chunk: i64,
-    task: Task<BlockChunk>,
+    request: GenerationRequest,
+    task: Task<GenerationResult>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GenerationTaskDisposition {
+    Hold,
+    PollForCommit,
+    PollForDiscard,
+}
+
+fn generation_task_disposition(
+    can_commit: bool,
+    task_identity: &GenerationIdentity,
+    current_identity: Option<&GenerationIdentity>,
+) -> GenerationTaskDisposition {
+    if current_identity.is_some_and(|identity| task_identity == identity) {
+        if can_commit {
+            GenerationTaskDisposition::PollForCommit
+        } else {
+            GenerationTaskDisposition::Hold
+        }
+    } else {
+        GenerationTaskDisposition::PollForDiscard
+    }
 }
 
 type RebaseEntityQuery<'w, 's> = Query<
@@ -91,6 +115,8 @@ impl Plugin for WorldPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<WorldMutationMessage>()
             .init_resource::<RetiredMeshAssets>()
+            .init_resource::<SessionInstanceCounterResource>()
+            .init_resource::<StreamConfigResource>()
             .add_systems(OnEnter(AppState::LoadingWorld), spawn_pending_world)
             .add_systems(
                 Update,
@@ -98,9 +124,12 @@ impl Plugin for WorldPlugin {
             )
             .add_systems(
                 Update,
-                integrate_generated_chunks
-                    .in_set(RuntimeSet::CompletedWork)
-                    .run_if(in_state(AppState::Playing)),
+                (
+                    sync_stream_window.run_if(in_state(AppState::Playing)),
+                    poll_generation_tasks,
+                )
+                    .chain()
+                    .in_set(RuntimeSet::CompletedWork),
             )
             .add_systems(
                 Update,
@@ -135,12 +164,17 @@ impl Plugin for WorldPlugin {
 fn spawn_pending_world(
     mut commands: Commands,
     pending: Option<Res<PendingWorldResource>>,
+    stream_config: Res<StreamConfigResource>,
+    mut session_counter: ResMut<SessionInstanceCounterResource>,
     mut day: ResMut<DayCycleResource>,
     mut mutations: MessageWriter<WorldMutationMessage>,
 ) {
     let Some(pending) = pending else {
         return;
     };
+    let instance_id = session_counter.next_id();
+    let center_chunk = pending.snapshot.player.chunk_x
+        + world_to_chunk(pending.snapshot.player.local_x.floor() as i64);
     day.0 = configured_start_time(pending.snapshot.day_time_ticks);
     let mut initialized = WorldState::from_snapshot(&pending.snapshot);
     let fixture_report = (environment_flag("SIDECRAFT_AUTOSTART")
@@ -159,6 +193,7 @@ fn spawn_pending_world(
     )));
     commands.insert_resource(WorldStateResource(initialized.state));
     commands.insert_resource(WorldSessionResource(WorldSession {
+        instance_id,
         id: pending.id.clone(),
         name: pending.snapshot.name.clone(),
         seed: pending.snapshot.seed,
@@ -169,15 +204,19 @@ fn spawn_pending_world(
             day_time_ticks: pending.snapshot.day_time_ticks,
         },
     }));
+    commands.insert_resource(StreamWindowResource(StreamWindow::new(
+        center_chunk,
+        stream_config.0,
+    )));
     commands.insert_resource(WorldPresentation::default());
     commands.insert_resource(WorldDirtySets::default());
     mutations.write(WorldMutationMessage {
-        world_id: pending.id.clone(),
+        session_instance: instance_id,
         report: initialized.report,
     });
     if let Some(report) = fixture_report {
         mutations.write(WorldMutationMessage {
-            world_id: pending.id.clone(),
+            session_instance: instance_id,
             report,
         });
     }
@@ -247,11 +286,9 @@ fn finish_loading_world(
 
 #[allow(clippy::too_many_arguments)]
 fn rebase_world(
-    mut commands: Commands,
     mut world: Option<ResMut<WorldStateResource>>,
     player: Option<Single<(&mut Transform, &mut RespawnPoint), With<Player>>>,
     mut entities: RebaseEntityQuery,
-    tasks: Query<Entity, With<ChunkGenerationTask>>,
     mut camera: Single<&mut Transform, (With<GameCamera>, Without<Player>)>,
     mut camera_rig: ResMut<CameraRig>,
 ) {
@@ -268,9 +305,6 @@ fn rebase_world(
     for mut transform in &mut entities {
         transform.translation.x -= offset;
     }
-    for entity in &tasks {
-        commands.entity(entity).despawn();
-    }
     world.rebase(delta_chunks);
     center_camera(
         player.0.translation.truncate(),
@@ -279,106 +313,168 @@ fn rebase_world(
     );
 }
 
+fn sync_stream_window(
+    world: Option<Res<WorldStateResource>>,
+    player: Option<Single<&Transform, With<Player>>>,
+    presentation: Option<Res<WorldPresentation>>,
+    mut dirty: Option<ResMut<WorldDirtySets>>,
+    mut window: Option<ResMut<StreamWindowResource>>,
+) {
+    let (Some(world), Some(player), Some(presentation), Some(dirty), Some(window)) =
+        (world, player, presentation, dirty.as_mut(), window.as_mut())
+    else {
+        return;
+    };
+    let center = world.origin_chunk() + world_to_chunk(player.translation.x.floor() as i64);
+    if center == window.center_chunk() {
+        return;
+    }
+    let next = StreamWindow::new(center, window.config());
+    let (entering, leaving) = presentation_window_changes(
+        next,
+        world.view().loaded_chunks(),
+        presentation.chunk_scenes.keys().copied(),
+    );
+    for chunk_x in entering.into_iter().chain(leaving) {
+        dirty.render.insert(chunk_x);
+        dirty.collision.insert(chunk_x);
+    }
+    window.0 = next;
+}
+
+fn presentation_window_changes(
+    window: StreamWindow,
+    loaded: impl IntoIterator<Item = i64>,
+    presented: impl IntoIterator<Item = i64>,
+) -> (BTreeSet<i64>, BTreeSet<i64>) {
+    let loaded = loaded.into_iter().collect::<BTreeSet<_>>();
+    let presented = presented.into_iter().collect::<BTreeSet<_>>();
+    let entering = loaded
+        .iter()
+        .filter(|chunk_x| window.contains_render(**chunk_x) && !presented.contains(chunk_x))
+        .copied()
+        .collect();
+    let leaving = presented
+        .iter()
+        .filter(|chunk_x| !window.contains_render(**chunk_x))
+        .copied()
+        .collect();
+    (entering, leaving)
+}
+
 fn request_chunk_generation(
     mut commands: Commands,
     world: Option<Res<WorldStateResource>>,
-    player: Option<Single<&Transform, With<Player>>>,
+    session: Option<Res<WorldSessionResource>>,
+    window: Option<Res<StreamWindowResource>>,
     tasks: Query<&ChunkGenerationTask>,
 ) {
-    let (Some(world), Some(player)) = (world, player) else {
+    let (Some(world), Some(session), Some(window)) = (world, session, window) else {
         return;
     };
+    let identity = GenerationIdentity::from(&**session);
     let loaded = world.view().loaded_chunks().collect::<HashSet<_>>();
     let in_flight = tasks
         .iter()
-        .filter(|task| task.origin_chunk == world.origin_chunk())
-        .map(|task| task.chunk_x)
+        .filter(|task| task.request.identity == identity)
+        .map(|task| task.request.global_chunk_x)
         .collect::<HashSet<_>>();
-    let center = world.origin_chunk() + world_to_chunk(player.translation.x.floor() as i64);
     let pool = AsyncComputeTaskPool::get();
-    for request in plan_generation_requests(
-        center,
-        world.origin_chunk(),
-        &loaded,
-        &in_flight,
-        StreamConfig::default(),
-    ) {
-        let seed = world.seed();
+    let request_budget = pool.thread_num().saturating_sub(tasks.iter().count());
+    for request in
+        plan_generation_requests(window.0, &identity, &loaded, &in_flight, request_budget)
+    {
+        debug_assert_eq!(world.seed(), request.identity.seed);
         let persisted = world.persisted_chunk(request.global_chunk_x);
+        let task_request = request.clone();
         let task = pool.spawn(async move {
-            persisted.unwrap_or_else(|| generate_chunk_at(seed, request.global_chunk_x))
+            let chunk = persisted.unwrap_or_else(|| {
+                generate_chunk_at(task_request.identity.seed, task_request.global_chunk_x)
+            });
+            GenerationResult {
+                request: task_request,
+                chunk,
+            }
         });
-        commands.spawn(ChunkGenerationTask {
-            chunk_x: request.global_chunk_x,
-            origin_chunk: request.origin_chunk,
-            task,
-        });
+        commands.spawn(ChunkGenerationTask { request, task });
     }
 }
 
-fn integrate_generated_chunks(
+fn poll_generation_tasks(
     mut commands: Commands,
+    state: Res<State<AppState>>,
     mut world: Option<ResMut<WorldStateResource>>,
     session: Option<Res<WorldSessionResource>>,
-    player: Option<Single<&Transform, With<Player>>>,
+    window: Option<Res<StreamWindowResource>>,
     mut tasks: Query<(Entity, &mut ChunkGenerationTask)>,
     mut mutations: MessageWriter<WorldMutationMessage>,
 ) {
-    let (Some(world), Some(session), Some(player)) = (world.as_mut(), session, player) else {
-        return;
-    };
-    let center = world.origin_chunk() + world_to_chunk(player.translation.x.floor() as i64);
-    let config = StreamConfig::default();
-    let mut integrated = 0;
+    let current_identity = session
+        .as_ref()
+        .map(|session| GenerationIdentity::from(&***session));
+    let can_commit = *state.get() == AppState::Playing
+        && world.is_some()
+        && session.is_some()
+        && window.is_some();
+    let mut ready = Vec::new();
     for (entity, mut generation) in &mut tasks {
-        if integrated >= config.max_integrations_per_frame {
-            break;
+        let disposition = generation_task_disposition(
+            can_commit,
+            &generation.request.identity,
+            current_identity.as_ref(),
+        );
+        if disposition == GenerationTaskDisposition::Hold {
+            continue;
         }
-        let Some(chunk) = check_ready(&mut generation.task) else {
+        let Some(result) = check_ready(&mut generation.task) else {
             continue;
         };
         commands.entity(entity).despawn();
-        if !result_is_still_requested(
-            generation.origin_chunk,
-            world.origin_chunk(),
-            chunk.x(),
-            center,
-            world
-                .view()
-                .contains_chunk(ChunkLayer::foreground(chunk.x())),
-            config,
-        ) {
+        if disposition == GenerationTaskDisposition::PollForCommit {
+            ready.push((generation.request.clone(), result));
+        }
+    }
+    let (Some(world), Some(session), Some(window), Some(identity)) =
+        (world.as_mut(), session, window, current_identity.as_ref())
+    else {
+        return;
+    };
+    ready.sort_by_key(|(_, result)| window.request_priority(result.request.global_chunk_x));
+    for (task_request, result) in ready {
+        let malformed =
+            task_request != result.request || result.chunk.x() != result.request.global_chunk_x;
+        let already_loaded = world
+            .view()
+            .contains_chunk(ChunkLayer::foreground(result.request.global_chunk_x));
+        if !result_is_still_requested(&task_request, &result, identity, window.0, already_loaded) {
+            if malformed {
+                warn!("discarding malformed chunk generation result");
+            }
             continue;
         }
-        let report = world.integrate_chunk(chunk);
+        let report = world.integrate_chunk(result.chunk);
         mutations.write(WorldMutationMessage {
-            world_id: session.id.clone(),
+            session_instance: session.instance_id,
             report,
         });
-        integrated += 1;
     }
 }
 
 fn unload_distant_chunks(
     mut world: Option<ResMut<WorldStateResource>>,
     session: Option<Res<WorldSessionResource>>,
-    player: Option<Single<&Transform, With<Player>>>,
+    window: Option<Res<StreamWindowResource>>,
     mut mutations: MessageWriter<WorldMutationMessage>,
 ) {
-    let (Some(world), Some(session), Some(player)) = (world.as_mut(), session, player) else {
+    let (Some(world), Some(session), Some(window)) = (world.as_mut(), session, window) else {
         return;
     };
-    let center = world.origin_chunk() + world_to_chunk(player.translation.x.floor() as i64);
-    let unload = plan_unloads(
-        center,
-        world.view().loaded_chunks(),
-        StreamConfig::default(),
-    );
+    let unload = plan_unloads(window.0, world.view().loaded_chunks());
     for chunk_x in unload {
         let report = world.unload_chunk(chunk_x);
         if !report.is_empty() {
             mutations.write(WorldMutationMessage {
-                world_id: session.id.clone(),
+                session_instance: session.instance_id,
                 report,
             });
         }
@@ -394,7 +490,7 @@ fn dispatch_mutation_reports(
         return;
     };
     for mutation in mutations.read() {
-        if mutation.world_id != session.id {
+        if mutation.session_instance != session.instance_id {
             continue;
         }
         apply_report_to_dirty(&mutation.report, dirty);
@@ -511,12 +607,18 @@ fn refresh_chunk_scenes(
     mut meshes: ResMut<Assets<Mesh>>,
     mut retired: ResMut<RetiredMeshAssets>,
     world: Option<Res<WorldStateResource>>,
+    window: Option<Res<StreamWindowResource>>,
     mut presentation: Option<ResMut<WorldPresentation>>,
     mut dirty: Option<ResMut<WorldDirtySets>>,
 ) {
-    let (Some(catalog), Some(light), Some(world), Some(presentation), Some(dirty)) =
-        (catalog, light, world, presentation.as_mut(), dirty.as_mut())
-    else {
+    let (Some(catalog), Some(light), Some(world), Some(window), Some(presentation), Some(dirty)) = (
+        catalog,
+        light,
+        world,
+        window,
+        presentation.as_mut(),
+        dirty.as_mut(),
+    ) else {
         return;
     };
     let work = dirty
@@ -528,7 +630,9 @@ fn refresh_chunk_scenes(
     for chunk_x in work {
         let rebuild_render = dirty.render.contains(&chunk_x);
         let rebuild_collision = dirty.collision.contains(&chunk_x);
-        if !world.view().contains_chunk(ChunkLayer::foreground(chunk_x)) {
+        if !window.contains_render(chunk_x)
+            || !world.view().contains_chunk(ChunkLayer::foreground(chunk_x))
+        {
             despawn_chunk_entities(&mut commands, presentation, &mut retired, chunk_x);
             continue;
         }
@@ -703,7 +807,6 @@ fn cleanup_world(
     presentation: Option<Res<WorldPresentation>>,
     mut retired: ResMut<RetiredMeshAssets>,
     entities: Query<Entity, With<WorldEntity>>,
-    tasks: Query<Entity, With<ChunkGenerationTask>>,
 ) {
     if let Some(presentation) = presentation {
         for scene in presentation.chunk_scenes.values() {
@@ -719,13 +822,11 @@ fn cleanup_world(
     for entity in &entities {
         commands.entity(entity).despawn();
     }
-    for entity in &tasks {
-        commands.entity(entity).despawn();
-    }
     commands.remove_resource::<WorldStateResource>();
     commands.remove_resource::<WorldSessionResource>();
     commands.remove_resource::<WorldPresentation>();
     commands.remove_resource::<WorldDirtySets>();
+    commands.remove_resource::<StreamWindowResource>();
     commands.remove_resource::<LightVolumeResource>();
     commands.remove_resource::<PendingWorldResource>();
 }
@@ -741,6 +842,7 @@ fn age_retired_meshes(mut retired: ResMut<RetiredMeshAssets>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::StreamConfig;
     use crate::domain::{BlockState, CellChange};
 
     #[test]
@@ -818,5 +920,47 @@ mod tests {
         assert_eq!(dirty.lighting, BTreeSet::from([ChunkLayer::backwall(0)]));
         assert!(dirty.collision.is_empty());
         assert!(dirty.simulation.contains(&position));
+    }
+
+    #[test]
+    fn presentation_window_changes_only_cross_the_render_boundary() {
+        let window = StreamWindow::new(10, StreamConfig::default());
+
+        let (entering, leaving) =
+            presentation_window_changes(window, [4, 5, 10, 15, 16], [4, 5, 10, 16]);
+
+        assert_eq!(entering, BTreeSet::from([15]));
+        assert_eq!(leaving, BTreeSet::from([4, 16]));
+    }
+
+    #[test]
+    fn task_lifecycle_holds_current_work_and_drains_orphans() {
+        let current = GenerationIdentity {
+            session_instance: crate::application::SessionInstanceId::new(2),
+            world_id: crate::application::WorldId::new("current").unwrap(),
+            generator_version: 2,
+            seed: 7,
+        };
+        let old = GenerationIdentity {
+            session_instance: crate::application::SessionInstanceId::new(1),
+            ..current.clone()
+        };
+
+        assert_eq!(
+            generation_task_disposition(false, &current, Some(&current)),
+            GenerationTaskDisposition::Hold
+        );
+        assert_eq!(
+            generation_task_disposition(true, &current, Some(&current)),
+            GenerationTaskDisposition::PollForCommit
+        );
+        assert_eq!(
+            generation_task_disposition(false, &old, Some(&current)),
+            GenerationTaskDisposition::PollForDiscard
+        );
+        assert_eq!(
+            generation_task_disposition(false, &old, None),
+            GenerationTaskDisposition::PollForDiscard
+        );
     }
 }

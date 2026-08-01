@@ -21,15 +21,15 @@ caves, water, plants, and technology progression of
 ## Resume here
 
 - Active item: none
-- Next item: M2.2 — streaming
+- Next item: M2.3 — SCW schema 6
 - Deferred item: M1.3 — add one local PowerShell quality-gate command
 - Blocker: none
-- Last completed work item: M2.1 persistent layers — added independent editable
-  foreground/backwall storage, interaction, rendering, lighting, and exact SCW
-  schema 5 persistence
+- Last completed work item: M2.2 streaming — added strict 3/5/7 activation,
+  presentation, and retention bands; capacity-bounded nearest-first generation;
+  complete result provenance; orphan draining; and deterministic integration
 - Verification baseline: confirmed 2026-08-01; formatting, Clippy with warnings
-  denied, 168 automated tests, the release build, deterministic real-GPU
-  midnight/noon gameplay captures, and a real-GPU editor launch passed locally
+  denied, 176 automated tests, the release build, and a deterministic real-GPU
+  gameplay capture passed locally
 
 At the start of a work session, mark exactly one item `[~]`. At the end, change
 it to `[x]`, `[!]`, or `[ ]`, record the next concrete item here, and record any
@@ -138,15 +138,18 @@ local gates pass.
 - `[x]` Test overlapping foreground/backwall blocks, negative coordinates,
   chunk edges, unload/reload, and save/reload.
 
-### M2.2 Streaming
+### M2.2 Streaming `[x]`
 
-- `[ ]` Configure simulation radius 3, render radius 5, and unload radius 7 for
+- `[x]` Configure simulation radius 3, render radius 5, and unload radius 7 for
   32-block horizontal chunks.
-- `[ ]` Prioritize load/generation jobs nearest-first.
-- `[ ]` Limit in-flight work according to available worker capacity.
-- `[ ]` Tag results with session and generator identity and discard stale or
+- `[x]` Prioritize load/generation jobs nearest-first.
+- `[x]` Limit in-flight work according to available worker capacity.
+- `[x]` Tag results with session and generator identity and discard stale or
   cancelled results before commit.
-- `[ ]` Preserve deterministic generation regardless of task completion order.
+- `[x]` Preserve deterministic generation regardless of task completion order.
+- `[x]` M2.2 verification passed against a clean parent revision: formatting,
+  Clippy with warnings denied, 176 tests, release build, scoped diff check, and
+  a deterministic real-GPU gameplay capture.
 
 ### M2.3 SCW schema 6
 

@@ -12,7 +12,8 @@ pub(crate) mod ui;
 pub(crate) mod world;
 
 use crate::application::{
-    PendingWorld, SaveCoordinator, WorldCatalog, WorldRepository, WorldSession, WorldState,
+    PendingWorld, SaveCoordinator, SessionInstanceCounter, StreamConfig, StreamWindow,
+    WorldCatalog, WorldRepository, WorldSession, WorldState,
 };
 use crate::domain::{DayCycle, LightVolume};
 use ::bevy::prelude::*;
@@ -61,6 +62,15 @@ pub(crate) struct WorldSessionResource(pub WorldSession);
 
 #[derive(Resource, Deref, DerefMut)]
 pub(crate) struct WorldStateResource(pub WorldState);
+
+#[derive(Resource, Default, Deref, DerefMut)]
+pub(crate) struct SessionInstanceCounterResource(pub SessionInstanceCounter);
+
+#[derive(Resource, Default, Deref, DerefMut)]
+pub(crate) struct StreamConfigResource(pub StreamConfig);
+
+#[derive(Resource, Deref, DerefMut)]
+pub(crate) struct StreamWindowResource(pub StreamWindow);
 
 #[derive(Resource, Default, Deref, DerefMut)]
 pub(crate) struct DayCycleResource(pub DayCycle);

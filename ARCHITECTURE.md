@@ -393,13 +393,21 @@ inputs, and performs one deterministic merge before committing.
 
 ## Threading and asynchronous work
 
-- Generation requests contain the world session identity, generator version,
-  seed, and global chunk coordinate.
+- The streaming window uses simulation radius 3, render radius 5, and unload
+  radius 7. Only render-band chunks own scene meshes and colliders; chunks in
+  the retention-only band remain authoritative but unpresented.
+- Generation requests contain a runtime-unique session incarnation, logical
+  world identity, generator version, seed, and global chunk coordinate.
 - Workers return owned chunk data and never access ECS or live world storage.
-- Results are committed only if the session still matches and the chunk remains
-  requested.
-- Requested chunks are prioritized nearest-first. Render and unload hysteresis
-  prevent task churn.
+- Requested chunks are prioritized nearest-first and in-flight work is bounded
+  by the async compute pool's available worker capacity.
+- Results are committed in stable nearest-first order only if their complete
+  provenance still matches, their payload coordinate is valid, and the chunk
+  remains requested and absent. Old-session tasks stay tracked until they
+  finish, then are drained without commit; current-session tasks are held while
+  paused or saving.
+- Global request coordinates do not change when the local simulation origin is
+  rebased. Render and unload hysteresis prevent task churn.
 - Save workers operate on immutable snapshots captured after a complete
   mutation commit and a whole presentation-clock tick.
 - One save coordinator serializes publication, coalesces queued requests, and

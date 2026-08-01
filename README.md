@@ -69,9 +69,10 @@ player; backwall blocks never collide with the player.
   four generated rear slices supply additional 2.5D depth.
 - An `i64` global chunk coordinate plus a frequently rebased local `f32`
   simulation origin, so rendering and physics remain precise far from spawn.
-- Lazy multi-threaded chunk generation through Bevy's async compute pool.
-  Nearby chunks are prioritized; distant chunks and their render/physics
-  entities are unloaded.
+- Capacity-bounded multi-threaded chunk generation through Bevy's async compute
+  pool. Nearby chunks are prioritized in a 3-chunk simulation, 5-chunk render,
+  and 7-chunk retention window; retained outer chunks shed render and physics
+  entities before their authoritative data is unloaded.
 - Chunk-batched opaque, cutout, and emissive six-face meshes plus merged
   two-dimensional compound colliders instead of one render and physics entity
   per block. Empty render layers are omitted.
@@ -227,9 +228,9 @@ The test suite has three levels:
   preserves the complete lighting field.
 - `tests/parallel_chunk_generation.rs` generates positive and negative chunks
   concurrently and verifies deterministic edge data.
-- `tests/world_lifecycle_e2e.rs` creates a world, saves it, reloads it, edits
-  blocks and player state, overwrites it atomically, lists it, and reconstructs
-  it again.
+- `tests/world_lifecycle_e2e.rs` creates, edits, saves, lists, and reconstructs
+  worlds, including distant edits that cross unload, save/reload, and revisit
+  boundaries.
 
 Automated tests are headless. A deterministic rendered smoke-test hook can
 bypass the menu, enter a newly created world, wait for chunk streaming, and

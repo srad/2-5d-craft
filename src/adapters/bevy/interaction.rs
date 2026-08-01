@@ -186,7 +186,7 @@ fn mine_target(
             && !result.report.is_empty()
         {
             mutations.write(WorldMutationMessage {
-                world_id: session.id.clone(),
+                session_instance: session.instance_id,
                 report: result.report,
             });
         }
@@ -222,7 +222,7 @@ fn place_selected(
         && !result.report.is_empty()
     {
         mutations.write(WorldMutationMessage {
-            world_id: session.id.clone(),
+            session_instance: session.instance_id,
             report: result.report,
         });
     }
