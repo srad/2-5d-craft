@@ -10,6 +10,9 @@ rustc-ice-*.txt
 /screenshots/
 /sidecraft-screenshot*.png
 /sidecraft-e2e.png
+# User-installed texture packs and the locally selected pack
+/texture-packs/
+/sidecraft.toml
 
 # Local agent and index state
 /.agents/

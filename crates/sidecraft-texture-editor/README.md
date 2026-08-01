@@ -25,16 +25,29 @@ The toolbar supports:
   projects.
 - **Regenerate**: repeats the current exact project.
 - **New Seed**: changes only the seed.
-- **Generate**: creates a coherent randomized parameter profile, preserves
-  pack ID, name, and author, clears material overrides, and immediately shows
-  the newest candidate.
+- **Generate**: creates a coherent randomized parameter profile, clears material
+  overrides, and immediately shows the newest candidate. The pack ID is derived,
+  so every press yields a new one, and an untouched `Generated <seed>` name
+  follows along. A name you typed yourself is kept, as is the author.
 - **Export Pack**: writes the exact displayed result to a new validated pack
-  folder without overwriting an existing pack.
+  folder without overwriting an existing pack. The dialog opens on `texture-packs/`
+  — the only folder the game scans — creating it if it is missing, and afterwards
+  returns to whichever folder the last export used.
 
 Unsaved New, Open, and close actions offer Save, Discard, and Cancel. Project
 replacement is blocked while an export is running. Save uses an atomic sibling
 temporary file, and a failed or cancelled dialog leaves the document
-unchanged.
+unchanged. A failed open, save, or export raises a dialog naming the operation
+and path, with the details available to copy; the status bar alone was too easy
+to miss.
+
+## Pack ID
+
+The ID is not typed: it is a reversible pack code derived from the seed,
+parameters, and material overrides, recomputed as you edit. Copy it to record a
+result, and paste one back into the ID box to rebuild exactly the project it
+names. Because it tracks content, exporting twice never collides unless the two
+packs really are identical.
 
 ## Project files
 

@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use sidecraft_textures::TexturePackSummary;
 
 use super::spawn_title;
 use crate::{
@@ -118,6 +119,22 @@ fn spawn_texture_pack_view(
                         UiAction::SelectTexturePack(pack.id.clone()),
                     );
                 }
+                if needs_empty_hint(&texture_packs.packs) {
+                    let root = texture_packs.custom_root();
+                    let shown = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
+                    panel.spawn((
+                        Text::new(format!(
+                            "No user packs in {}\nExport one there from the texture editor.",
+                            shown.display()
+                        )),
+                        TextFont {
+                            font: font.clone(),
+                            font_size: FontSize::Px(16.0),
+                            ..default()
+                        },
+                        TextColor(Color::srgb(0.78, 0.72, 0.55)),
+                    ));
+                }
                 panel.spawn((
                     Text::new(format!("PAGE {} / {pages}", menu.page + 1)),
                     TextFont {
@@ -139,6 +156,15 @@ fn spawn_texture_pack_view(
             });
             spawn_version(root, &font);
         });
+}
+
+/// Whether the catalogue holds nothing but the built-in pack.
+///
+/// A one-entry list reads as though the default were locked, when in truth there
+/// is simply nowhere for a second pack to have come from. Discovery skips a
+/// missing or empty user folder without a word, so the screen has to say it.
+fn needs_empty_hint(packs: &[TexturePackSummary]) -> bool {
+    packs.len() <= 1
 }
 
 fn page_count(texture_packs: &TexturePackCatalog) -> usize {
@@ -201,6 +227,22 @@ mod tests {
         assert_eq!(0_usize.div_ceil(PAGE_SIZE).max(1), 1);
         assert_eq!(PAGE_SIZE.div_ceil(PAGE_SIZE), 1);
         assert_eq!((PAGE_SIZE + 1).div_ceil(PAGE_SIZE), 2);
+    }
+
+    fn summary(id: &str) -> TexturePackSummary {
+        TexturePackSummary {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            author: "Test".into(),
+            path: std::path::PathBuf::from(id),
+            validation_error: None,
+        }
+    }
+
+    #[test]
+    fn the_hint_appears_only_while_the_default_stands_alone() {
+        assert!(needs_empty_hint(&[summary("default")]));
+        assert!(!needs_empty_hint(&[summary("default"), summary("mine")]));
     }
 
     #[test]

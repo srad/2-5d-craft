@@ -85,9 +85,16 @@ pub(crate) fn validate_metadata(id: &str, name: &str, author: &str) -> Result<()
     Ok(())
 }
 
+/// Longest permitted pack ID.
+///
+/// Generous enough for a saturated pack code (~130 characters) while keeping the deepest asset
+/// path, `<root>/<id>/blocks/coal_ore/side_0.png`, inside the 260-character Windows `MAX_PATH`
+/// default for any reasonable export root.
+pub const MAX_PACK_ID_LENGTH: usize = 160;
+
 fn validate_id(id: &str) -> Result<(), PackError> {
     if id.is_empty()
-        || id.len() > 64
+        || id.len() > MAX_PACK_ID_LENGTH
         || !id
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')

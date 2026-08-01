@@ -19,6 +19,11 @@ pub struct GeneratedPack {
 
 pub fn generate_pack(options: &GenerateOptions) -> Result<GeneratedPack, PackError> {
     validate_options(options)?;
+    // Pixels must only ever come from on-grid values, or a pack code would name a pack the
+    // generator cannot reproduce. Validation runs first so this only quantizes in-range values.
+    let mut options = options.clone();
+    options.snap_to_control_grid();
+    let options = &options;
     let mut assets = BTreeMap::new();
     for block in BlockKind::ALL {
         let material_options = options_for_material(options, block)?;
@@ -56,10 +61,12 @@ pub fn generate_pack(options: &GenerateOptions) -> Result<GeneratedPack, PackErr
 
     let manifest = PackManifest {
         schema_version: PACK_SCHEMA_VERSION,
-        id: options
-            .id
-            .clone()
-            .unwrap_or_else(|| format!("generated-{}", options.seed)),
+        id: match options.id.clone() {
+            Some(id) => id,
+            // Falling back to the pack code keeps a CLI-generated pack identified by what it
+            // actually contains, exactly as an editor-exported one is.
+            None => crate::TextureProject::from_generate_options(options)?.pack_id()?,
+        },
         name: options
             .name
             .clone()

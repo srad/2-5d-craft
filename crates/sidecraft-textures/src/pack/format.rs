@@ -10,7 +10,7 @@ use std::{
 pub const BLOCK_SIZE: u32 = 16;
 pub const VARIANT_COUNT: usize = 4;
 pub const PACK_SCHEMA_VERSION: u32 = 1;
-pub const GENERATOR_VERSION: u32 = 1;
+pub const GENERATOR_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BlockKind {
@@ -234,6 +234,16 @@ pub struct TexturePackSummary {
 #[derive(Debug)]
 pub enum PackError {
     Io(io::Error),
+    /// An IO failure carrying the call that produced it and the path it touched.
+    ///
+    /// Bare `Io` prints the OS text alone — "Access is denied. (os error 5)" —
+    /// which cannot say *which* of an export's dozens of filesystem calls was
+    /// refused. Writers use this variant so a failure names itself.
+    IoAt {
+        operation: &'static str,
+        path: PathBuf,
+        source: io::Error,
+    },
     TomlDecode(toml::de::Error),
     TomlEncode(toml::ser::Error),
     Image(image::ImageError),
@@ -244,6 +254,11 @@ impl Display for PackError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(error) => write!(formatter, "{error}"),
+            Self::IoAt {
+                operation,
+                path,
+                source,
+            } => write!(formatter, "{operation} {}: {source}", path.display()),
             Self::TomlDecode(error) => write!(formatter, "{error}"),
             Self::TomlEncode(error) => write!(formatter, "{error}"),
             Self::Image(error) => write!(formatter, "{error}"),

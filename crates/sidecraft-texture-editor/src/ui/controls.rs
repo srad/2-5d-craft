@@ -2,11 +2,16 @@ use bevy_egui::egui;
 use sidecraft_textures::{
     BlockKind, ControlChoiceValue, ControlDefinition, ControlField, MaterialField,
     TextureParameters, TextureProject, TypedMaterialOverrides, control_definition, material_fields,
+    snap_f32,
 };
 
-pub(super) fn draw_pack_controls(ui: &mut egui::Ui, project: &mut TextureProject) {
+/// Draws the pack panel, returning a code the user pasted in to restore.
+pub(super) fn draw_pack_controls(
+    ui: &mut egui::Ui,
+    project: &mut TextureProject,
+    pasted: &mut String,
+) -> Option<String> {
     section(ui, "Pack");
-    text_row(ui, "ID", &mut project.pack.id);
     text_row(ui, "Name", &mut project.pack.name);
     text_row(ui, "Author", &mut project.pack.author);
     ui.horizontal(|ui| {
@@ -17,6 +22,40 @@ pub(super) fn draw_pack_controls(ui: &mut egui::Ui, project: &mut TextureProject
                 .range(0..=u64::MAX),
         );
     });
+
+    // The ID is derived, never typed: it is a reversible code for this exact project, so showing
+    // it read-only next to a paste box is the whole round trip.
+    let code = project.pack_id();
+    ui.horizontal(|ui| {
+        ui.label("ID");
+        match &code {
+            Ok(code) => {
+                ui.add(egui::Label::new(egui::RichText::new(code).monospace()).wrap());
+                if ui.button("Copy").clicked() {
+                    ui.ctx().copy_text(code.clone());
+                }
+            }
+            Err(error) => {
+                ui.colored_label(egui::Color32::from_rgb(200, 80, 80), error.to_string());
+            }
+        }
+    });
+    ui.small("Paste an ID to rebuild the project it names.");
+    let mut restore = None;
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(pasted)
+                .hint_text("t1…")
+                .desired_width(180.0),
+        );
+        if ui
+            .add_enabled(!pasted.trim().is_empty(), egui::Button::new("Load"))
+            .clicked()
+        {
+            restore = Some(pasted.trim().to_owned());
+        }
+    });
+    restore
 }
 
 pub(super) fn draw_global_controls(ui: &mut egui::Ui, values: &mut TextureParameters) {
@@ -294,6 +333,9 @@ fn optional_f32(ui: &mut egui::Ui, field: MaterialField, value: &mut Option<f32>
                 .range(definition.minimum.unwrap() as f32..=definition.maximum.unwrap() as f32)
                 .speed(definition.step.unwrap()),
         );
+        // `speed` is drag sensitivity, not a step: unlike the global sliders this widget will
+        // happily produce 1.0637. Snap it, or the value cannot be addressed by a pack code.
+        *current = snap_f32(definition.field, *current);
     });
 }
 

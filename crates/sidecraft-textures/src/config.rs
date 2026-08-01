@@ -1,10 +1,10 @@
 use crate::{
-    BlockKind, PackError,
+    BlockKind, ControlField, PackError,
     controls::{
         CLUSTER_DENSITY_LIMITS, CLUSTER_SIZE_LIMITS, CONTRAST_LIMITS, GRASS_FRINGE_DEPTH_LIMITS,
         LEAF_HOLE_DENSITY_LIMITS, LIGHTNESS_LIMITS, ORE_BRANCHES_LIMITS, ORE_CENTER_BIAS_LIMITS,
         ORE_COVERAGE_LIMITS, ORE_THICKNESS_LIMITS, SATURATION_LIMITS, SMOOTHING_PASSES_LIMITS,
-        VARIANT_STRENGTH_LIMITS,
+        VARIANT_STRENGTH_LIMITS, snap_f32,
     },
 };
 use clap::ValueEnum;
@@ -127,6 +127,27 @@ impl Default for GenerateOptions {
 }
 
 impl GenerateOptions {
+    /// Snaps every decimal parameter onto its control's step grid.
+    ///
+    /// The generator draws continuous floats and the CLI accepts arbitrary strings, but a pack
+    /// code addresses each decimal by grid index. Quantizing here makes the value space finite so
+    /// a code reproduces a pack exactly rather than approximately. Integer controls have a step of
+    /// 1 and are already on-grid once `validate_options` has bounded them, so call this *after*
+    /// validating — it quantizes, it does not range-check.
+    pub fn snap_to_control_grid(&mut self) {
+        for (field, value) in [
+            (ControlField::ClusterDensity, &mut self.cluster_density),
+            (ControlField::Contrast, &mut self.contrast),
+            (ControlField::Saturation, &mut self.saturation),
+            (ControlField::Lightness, &mut self.lightness),
+            (ControlField::OreCoverage, &mut self.ore_coverage),
+            (ControlField::OreCenterBias, &mut self.ore_center_bias),
+            (ControlField::LeafHoleDensity, &mut self.leaf_hole_density),
+        ] {
+            *value = snap_f32(field, *value);
+        }
+    }
+
     pub fn apply_material_override(
         &mut self,
         material: &str,
@@ -285,6 +306,9 @@ pub(crate) fn options_for_material(
         }
     }
     validate_options(&resolved)?;
+    // Overrides are parsed from free-form strings after the global snap, so quantize again once
+    // they are folded in.
+    resolved.snap_to_control_grid();
     Ok(resolved)
 }
 

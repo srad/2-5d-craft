@@ -1,14 +1,18 @@
 use crate::{
-    BlockKind, ClusterShape, GENERATOR_VERSION, GenerateOptions, MaterialField, OrePattern,
-    PackError, PalettePreset, PatternAlgorithm, PlacementAlgorithm, QualityPreset,
-    config::validate_options, controls::material_fields, pack::validate_metadata,
+    BlockKind, ClusterShape, ControlField, GENERATOR_VERSION, GenerateOptions, MaterialField,
+    OrePattern, PackCodeState, PackError, PalettePreset, PatternAlgorithm, PlacementAlgorithm,
+    QualityPreset,
+    code::{decode_pack_code, encode_pack_code},
+    config::validate_options,
+    controls::{material_fields, snap_f32},
+    pack::validate_metadata,
     randomized_options,
 };
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const PROJECT_SCHEMA_VERSION: u32 = 1;
+pub const PROJECT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
@@ -22,10 +26,14 @@ pub struct TextureProject {
     pub material: BTreeMap<String, TypedMaterialOverrides>,
 }
 
+/// The pack's human-facing labels.
+///
+/// There is deliberately no `id` here. The ID is [`TextureProject::pack_id`], derived from the
+/// generation state on demand — storing it alongside its own inputs is what let it drift out of
+/// date and pin every export to the first seed the editor ever used.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct PackSettings {
-    pub id: String,
     pub name: String,
     pub author: String,
 }
@@ -96,9 +104,46 @@ pub struct TypedMaterialOverrides {
 impl TextureProject {
     pub fn randomized(seed: u64) -> Self {
         let mut options = randomized_options(seed);
-        options.id = Some(format!("generated-{seed}"));
-        options.name = Some(format!("Generated {seed}"));
+        options.name = Some(auto_pack_name(seed));
         Self::from_generate_options(&options).expect("safe randomized options form a project")
+    }
+
+    /// Whether the name is still the one the generator picked, rather than one the user typed.
+    ///
+    /// Lets a reroll refresh an untouched name without ever discarding a chosen one.
+    pub fn is_auto_named(&self) -> bool {
+        self.pack.name == auto_pack_name(self.seed)
+    }
+
+    /// The pack's identity: a reversible code for this exact generation state.
+    ///
+    /// Derived rather than stored, so it tracks the project by construction and two projects
+    /// share an ID only when they generate identical pixels. [`decode_pack_code`] turns it back
+    /// into the seed, parameters and material overrides it names.
+    pub fn pack_id(&self) -> Result<String, PackError> {
+        encode_pack_code(&PackCodeState {
+            seed: self.seed,
+            parameters: self.parameters.clone(),
+            material: self.material.clone(),
+        })
+    }
+
+    /// Rebuilds a project from a pack code, taking labels from `name` and `author`.
+    pub fn from_pack_id(code: &str, name: &str, author: &str) -> Result<Self, PackError> {
+        let state = decode_pack_code(code)?;
+        let project = Self {
+            project_schema_version: PROJECT_SCHEMA_VERSION,
+            generator_version: GENERATOR_VERSION,
+            seed: state.seed,
+            pack: PackSettings {
+                name: name.to_owned(),
+                author: author.to_owned(),
+            },
+            parameters: state.parameters,
+            material: state.material,
+        };
+        project.validate()?;
+        Ok(project)
     }
 
     pub fn validate(&self) -> Result<(), PackError> {
@@ -114,13 +159,13 @@ impl TextureProject {
                 self.generator_version
             )));
         }
-        validate_metadata(&self.pack.id, &self.pack.name, &self.pack.author)?;
+        validate_metadata(&self.pack_id()?, &self.pack.name, &self.pack.author)?;
         self.to_generate_options().map(|_| ())
     }
 
     pub fn to_generate_options(&self) -> Result<GenerateOptions, PackError> {
         let mut options = self.parameters.to_options(self.seed);
-        options.id = Some(self.pack.id.clone());
+        options.id = Some(self.pack_id()?);
         options.name = Some(self.pack.name.clone());
         options.author = self.pack.author.clone();
         for (material, overrides) in &self.material {
@@ -136,6 +181,11 @@ impl TextureProject {
 
     pub fn from_generate_options(options: &GenerateOptions) -> Result<Self, PackError> {
         validate_options(options)?;
+        // A project is what a pack code addresses, so its stored values must be on-grid whatever
+        // built the options — the randomizer, the CLI, or a hand-written `.sctex.toml`.
+        let mut snapped = options.clone();
+        snapped.snap_to_control_grid();
+        let options = &snapped;
         let mut material = BTreeMap::new();
         for (name, fields) in &options.material_overrides {
             let block = BlockKind::ALL
@@ -153,10 +203,6 @@ impl TextureProject {
             generator_version: GENERATOR_VERSION,
             seed: options.seed,
             pack: PackSettings {
-                id: options
-                    .id
-                    .clone()
-                    .unwrap_or_else(|| format!("generated-{}", options.seed)),
                 name: options
                     .name
                     .clone()
@@ -166,13 +212,17 @@ impl TextureProject {
             parameters: TextureParameters::from_options(options),
             material,
         };
-        validate_metadata(&project.pack.id, &project.pack.name, &project.pack.author)?;
+        validate_metadata(
+            &project.pack_id()?,
+            &project.pack.name,
+            &project.pack.author,
+        )?;
         Ok(project)
     }
 }
 
 impl TextureParameters {
-    fn from_options(options: &GenerateOptions) -> Self {
+    pub(crate) fn from_options(options: &GenerateOptions) -> Self {
         Self {
             palette: options.palette,
             pattern: options.pattern,
@@ -285,7 +335,7 @@ impl TypedMaterialOverrides {
         Ok(())
     }
 
-    fn validate_applicability(&self, block: BlockKind) -> Result<(), PackError> {
+    pub(crate) fn validate_applicability(&self, block: BlockKind) -> Result<(), PackError> {
         let allowed = material_fields(block);
         if let Some(field) = MaterialField::ALL
             .into_iter()
@@ -328,8 +378,32 @@ impl TypedMaterialOverrides {
                 }
             }
         }
+        result.snap_to_control_grid();
         Ok(result)
     }
+
+    /// Snaps every overridden decimal onto its control's step grid, matching
+    /// [`GenerateOptions::snap_to_control_grid`] so overrides survive a pack-code round trip.
+    pub fn snap_to_control_grid(&mut self) {
+        for (field, value) in [
+            (ControlField::ClusterDensity, &mut self.cluster_density),
+            (ControlField::Contrast, &mut self.contrast),
+            (ControlField::Saturation, &mut self.saturation),
+            (ControlField::Lightness, &mut self.lightness),
+            (ControlField::OreCoverage, &mut self.ore_coverage),
+            (ControlField::OreCenterBias, &mut self.ore_center_bias),
+            (ControlField::LeafHoleDensity, &mut self.leaf_hole_density),
+        ] {
+            if let Some(value) = value.as_mut() {
+                *value = snap_f32(field, *value);
+            }
+        }
+    }
+}
+
+/// The name the generator gives a project built purely by randomizing `seed`.
+pub fn auto_pack_name(seed: u64) -> String {
+    format!("Generated {seed}")
 }
 
 pub fn slugify_pack_id(value: &str) -> String {

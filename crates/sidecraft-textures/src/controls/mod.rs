@@ -1,10 +1,12 @@
 mod applicability;
 mod choices;
 mod definitions;
+mod grid;
 
 pub use applicability::{MaterialField, material_fields};
 pub use choices::ControlChoiceValue;
 pub use definitions::{CONTROL_DEFINITIONS, control_definition};
+pub use grid::{control_cardinality, control_index, control_value, snap_f32};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct F32Limits {

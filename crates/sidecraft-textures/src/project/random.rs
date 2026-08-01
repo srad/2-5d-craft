@@ -4,15 +4,30 @@ use crate::{
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// A fresh seed, narrow enough to keep pack codes short.
+///
+/// 32 bits is 4.3 billion distinct packs and costs 4 base36 characters in every code; the full 64
+/// would cost 6 more for entropy nobody needs. Seeds stay `u64` throughout, so wider ones from
+/// older projects still encode.
 pub fn random_seed() -> u64 {
     let time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as u64;
-    time ^ u64::from(std::process::id()).rotate_left(17)
+    let mixed = time ^ u64::from(std::process::id()).rotate_left(17);
+    // Fold the high half in rather than truncating, so the low bits still move quickly.
+    (mixed ^ (mixed >> 32)) & 0xffff_ffff
 }
 
 pub fn randomized_options(seed: u64) -> GenerateOptions {
+    let mut options = unsnapped_options(seed);
+    // `ChoiceRng::float` draws continuous values; the pack code addresses decimals by grid index.
+    // Snapping here is what makes a seed-only code reproduce its pack exactly.
+    options.snap_to_control_grid();
+    options
+}
+
+fn unsnapped_options(seed: u64) -> GenerateOptions {
     let mut rng = ChoiceRng::new(seed);
     let palettes = [
         PalettePreset::Earthy,

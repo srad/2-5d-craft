@@ -15,12 +15,16 @@ use sidecraft_textures::{BlockKind, random_seed};
 #[derive(Resource)]
 pub(crate) struct EditorUiState {
     selected_material: BlockKind,
+    pasted_code: String,
+    code_error: Option<String>,
 }
 
 impl Default for EditorUiState {
     fn default() -> Self {
         Self {
             selected_material: BlockKind::Stone,
+            pasted_code: String::new(),
+            code_error: None,
         }
     }
 }
@@ -31,7 +35,7 @@ pub(crate) fn draw_editor(
     mut document: ResMut<EditorDocument>,
     mut generation: ResMut<GenerationCoordinator>,
     export: Res<ExportCoordinator>,
-    status: Res<EditorStatus>,
+    mut status: ResMut<EditorStatus>,
     mut commands: ResMut<EditorCommands>,
     mut confirmation: ResMut<Confirmation>,
     mut viewport: ResMut<PreviewViewport>,
@@ -89,8 +93,7 @@ pub(crate) fn draw_editor(
                         generation.request_now(document.revision);
                     }
                     if ui.button("New Seed").clicked() {
-                        document.project.seed = random_seed();
-                        document.mark_changed();
+                        document.reseed(random_seed());
                         generation.request(document.revision);
                     }
                     if ui
@@ -155,16 +158,32 @@ pub(crate) fn draw_editor(
             ui.add_enabled_ui(!locked, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     let before = document.project.clone();
-                    controls::draw_pack_controls(ui, &mut document.project);
+                    let restore = controls::draw_pack_controls(
+                        ui,
+                        &mut document.project,
+                        &mut ui_state.pasted_code,
+                    );
                     controls::draw_global_controls(ui, &mut document.project.parameters);
                     controls::draw_material_controls(
                         ui,
                         &mut document.project,
                         &mut ui_state.selected_material,
                     );
-                    if document.project != before {
+                    if let Some(code) = restore {
+                        match document.restore_from_pack_id(&code) {
+                            Ok(()) => {
+                                ui_state.pasted_code.clear();
+                                ui_state.code_error = None;
+                                generation.request_now(document.revision);
+                            }
+                            Err(error) => ui_state.code_error = Some(error.to_string()),
+                        }
+                    } else if document.project != before {
                         document.mark_changed();
                         generation.request(document.revision);
+                    }
+                    if let Some(error) = &ui_state.code_error {
+                        ui.colored_label(egui::Color32::from_rgb(200, 80, 80), error);
                     }
                 });
             });
@@ -187,6 +206,7 @@ pub(crate) fn draw_editor(
     if let Some(action) = confirmation.0 {
         show_confirmation(context, action, &mut confirmation, &mut commands);
     }
+    show_failure(context, &mut status);
 }
 
 fn configure_style(context: &egui::Context) {
@@ -229,6 +249,37 @@ fn request_destructive(
         confirmation.0 = Some(action);
     } else {
         commands.0.push_back(EditorCommand::Perform(action));
+    }
+}
+
+/// Puts a failed open, save or export in front of the player.
+///
+/// Deliberately not used for generation or pack-code errors: those persist across
+/// frames while the offending input stands, so a dialog would reopen every frame.
+/// They stay the inline red labels they already are.
+fn show_failure(context: &egui::Context, status: &mut EditorStatus) {
+    let Some(detail) = status.error.clone() else {
+        return;
+    };
+    let mut dismissed = false;
+    egui::Window::new("Something went wrong")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(context, |ui| {
+            ui.colored_label(egui::Color32::from_rgb(224, 112, 96), &detail);
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("OK").clicked() {
+                    dismissed = true;
+                }
+                if ui.button("Copy details").clicked() {
+                    ui.ctx().copy_text(detail.clone());
+                }
+            });
+        });
+    if dismissed {
+        status.error = None;
     }
 }
 

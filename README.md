@@ -179,7 +179,11 @@ inventories, drops, and station state are added.
 
 The complete built-in pack is under `assets/texture-packs/default`. User packs
 are folders under `texture-packs/`; partial packs inherit each missing face,
-icon, environment image, or player color from the default. Select packs from
+icon, environment image, or player color from the default. Only `texture-packs/`
+is scanned, so a pack dropped beside the built-in one is never found: the
+editor's `Export Pack` dialog opens there, and `SETTINGS > TEXTURE PACKS` names
+the folder while it is still empty rather than listing the default on its own.
+Select packs from
 `SETTINGS > TEXTURE PACKS` to preview them immediately on the live menu scene.
 `APPLY` validates and persists the selection before updating stable render
 handles; `BACK` restores the active pack. The generator's `preview.png` remains
@@ -191,7 +195,7 @@ The generator is a separate publishable package:
 cargo run -p sidecraft-textures --
 cargo run -p sidecraft-textures -- generate --seed 42 --pattern short-walks
 cargo run -p sidecraft-textures -- init texture-generator.toml
-cargo run -p sidecraft-textures -- validate texture-packs/generated-42
+cargo run -p sidecraft-textures -- validate texture-packs/t8cetw9w9d
 ```
 
 No generator options produces one randomized safe pack and prints its seed and

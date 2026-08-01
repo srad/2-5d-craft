@@ -440,6 +440,17 @@ engine form a coherent living-builder loop.
   all workspace gates, the release build, and a real-GPU launch pass, but
   manual editor visual acceptance remains pending because the hidden hardware
   surface could not be captured through the Windows compositor.
+  Three defects surfaced afterwards in real use, none of them reachable from
+  tests. Export failures were reported only as one uncoloured status-bar line
+  that the next message overwrote, and `PackError::Io` printed the bare OS text,
+  so "Access is denied. (os error 5)" could not say which of the writer's dozens
+  of calls was refused; failures now raise a dialog and errors carry their
+  operation and path. That denial was Windows refusing to move the finished pack
+  directory while a scanner held the newly written PNGs, so the writer retries
+  and then falls back to copying. And exports landed in `assets/texture-packs/`,
+  which is never scanned, because the dialog opened nowhere in particular — it
+  now opens on `texture-packs/`, and the menu names that folder while it is
+  empty instead of showing the built-in pack alone.
 - `[ ]` Extend M4's material-specific face and restrained silhouette language
   to later ecology, exploration, and technology content without smoothing the
   pixel-art aesthetic.

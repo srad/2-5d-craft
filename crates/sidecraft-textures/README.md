@@ -2,7 +2,7 @@
 
 `sidecraft-textures` is a standalone Rust library and CLI for generating,
 validating, resolving, and previewing small pixel-art texture packs. It uses a
-fixed SplitMix64-based random stream and records `generator_version = 1`, so an
+fixed SplitMix64-based random stream and records `generator_version = 2`, so an
 explicit seed and resolved recipe replay exactly across supported platforms.
 
 The package is independent from Bevy and Sidecraft gameplay types. Sidecraft
@@ -13,7 +13,11 @@ published on its own.
 
 With no arguments, the CLI chooses a random seed and one coherent safe profile
 for the selected pixel-pattern algorithm. It creates a new folder and never
-overwrites an existing pack:
+overwrites an existing pack. A pack is assembled in a hidden temporary folder and
+moved into place; on Windows a scanner still holding the freshly written PNGs can
+refuse that move, so the writer retries briefly and then copies rather than
+failing, and every filesystem error names the operation and path that produced
+it:
 
 ```powershell
 cargo run -p sidecraft-textures --
@@ -181,3 +185,30 @@ cargo run -p sidecraft-texture-editor
 
 See the
 [`sidecraft-texture-editor` guide](../sidecraft-texture-editor/README.md).
+
+## Pack codes
+
+A generated pack's ID is a *pack code*: a reversible, compressed encoding of
+everything that determined its pixels — the seed, all 19 global controls, and
+every material override. Decoding one rebuilds that exact state, so an ID names
+a recipe rather than merely labelling a folder.
+
+```powershell
+cargo run -p sidecraft-textures -- generate --seed 1785602118
+# generated texture-packs/t8cetw9w9d
+
+cargo run -p sidecraft-textures -- generate --code t8cetw9w9d
+# byte-identical assets, same ID
+```
+
+Codes stay short by never storing what is already implied. An untouched
+randomized pack is fully described by its seed, so its code carries nothing
+else and runs about 10 characters; changing one control adds a 19-bit mask and
+just that value. Every decimal control is quantized onto the step grid its UI
+slider already uses, which is what makes the round trip exact rather than
+approximate. The largest possible project — every block overriding every
+applicable field — still fits well inside the 160-character ID limit.
+
+Because codes are content-derived, two packs share an ID only when they
+generate identical pixels, and any edit produces a new one. Passing `--id` or
+`--name-prefix` opts back out to a fixed folder name.

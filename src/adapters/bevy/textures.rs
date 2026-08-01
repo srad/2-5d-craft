@@ -10,7 +10,9 @@ use std::{
 };
 
 const DEFAULT_PACK_ROOT: &str = "assets/texture-packs/default";
-const CUSTOM_PACK_ROOT: &str = "texture-packs";
+/// Shared with the editor, which starts its export dialog here so packs land in
+/// the one folder this catalogue scans.
+const CUSTOM_PACK_ROOT: &str = sidecraft_textures::USER_PACK_ROOT;
 const CONFIG_PATH: &str = "sidecraft.toml";
 const CONFIG_SCHEMA_VERSION: u32 = 1;
 
@@ -44,6 +46,12 @@ pub(crate) struct TexturePackPreview(pub(crate) ResolvedPack);
 impl TexturePackCatalog {
     pub(crate) fn active_id(&self) -> &str {
         &self.active.manifest.id
+    }
+
+    /// The folder user packs are scanned from, so the menu can name it when the
+    /// scan comes back with nothing in it.
+    pub(crate) fn custom_root(&self) -> &Path {
+        &self.custom_root
     }
 
     pub(crate) fn refresh(&mut self) {

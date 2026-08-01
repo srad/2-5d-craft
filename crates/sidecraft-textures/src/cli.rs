@@ -1,8 +1,8 @@
 use crate::recipe::Recipe;
 use clap::{Args, Parser, Subcommand};
 use sidecraft_textures::{
-    PackError, initialize_recipe, load_resolved_pack, load_texture_project, validate_pack,
-    write_generated_pack, write_preview,
+    PackError, TextureProject, initialize_recipe, load_resolved_pack, load_texture_project,
+    validate_pack, write_generated_pack, write_preview,
 };
 use std::path::PathBuf;
 
@@ -56,6 +56,9 @@ struct GenerateArgs {
     recipe: Option<PathBuf>,
     #[arg(long, value_name = "FILE")]
     project: Option<PathBuf>,
+    /// Rebuild the exact pack a pack code names.
+    #[arg(long, value_name = "CODE")]
+    code: Option<String>,
     #[arg(long)]
     palette: Option<String>,
     #[arg(long)]
@@ -104,6 +107,7 @@ impl Default for GenerateArgs {
             seed: None,
             count: 1,
             output: PathBuf::from("texture-packs"),
+            code: None,
             id: None,
             name_prefix: None,
             author: None,
@@ -180,6 +184,17 @@ fn generate(arguments: GenerateArgs) -> Result<(), PackError> {
         println!("generated {}", path.display());
         return Ok(());
     }
+    if let Some(code) = &arguments.code {
+        let project = TextureProject::from_pack_id(
+            code,
+            &format!("Pack {code}"),
+            arguments.author.as_deref().unwrap_or("Sidecraft"),
+        )?;
+        let pack = sidecraft_textures::generate_pack(&project.to_generate_options()?)?;
+        let path = write_generated_pack(&pack, &arguments.output)?;
+        println!("generated {}", path.display());
+        return Ok(());
+    }
     if arguments.id.is_some() && arguments.count != 1 {
         return Err(PackError::Invalid(
             "--id can only be used when --count is 1".into(),
@@ -200,13 +215,15 @@ fn generate(arguments: GenerateArgs) -> Result<(), PackError> {
             .author
             .clone()
             .unwrap_or_else(|| options.author.clone());
-        let id_prefix = arguments.name_prefix.as_deref().unwrap_or("generated");
-        options.id = Some(
+        // Left as `None`, generation derives the pack code — an ID that names the whole recipe
+        // rather than just the seed. An explicit `--id`, or a `--name-prefix` to group a batch
+        // under readable folder names, still wins.
+        options.id = arguments.id.clone().or_else(|| {
             arguments
-                .id
-                .clone()
-                .unwrap_or_else(|| format!("{}-{seed}", slug(id_prefix))),
-        );
+                .name_prefix
+                .as_deref()
+                .map(|prefix| format!("{}-{seed}", slug(prefix)))
+        });
         options.name = Some(format!(
             "{} {seed}",
             arguments.name_prefix.as_deref().unwrap_or("Generated")
@@ -226,6 +243,7 @@ impl GenerateArgs {
     fn validate_project_mode(&self) -> Result<(), PackError> {
         let has_conflict = self.seed.is_some()
             || self.count != 1
+            || self.code.is_some()
             || self.id.is_some()
             || self.name_prefix.is_some()
             || self.author.is_some()
@@ -380,6 +398,6 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        sidecraft_textures::validate_pack(&output.join(project.pack.id), true).unwrap();
+        sidecraft_textures::validate_pack(&output.join(project.pack_id().unwrap()), true).unwrap();
     }
 }

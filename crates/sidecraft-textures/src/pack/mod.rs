@@ -20,6 +20,13 @@ pub use writing::{initialize_recipe, write_generated_pack, write_preview};
 
 use std::path::{Path, PathBuf};
 
+/// Folder the game scans for user-installed packs, relative to the working
+/// directory. The editor points its export dialog here so a pack lands where the
+/// game will actually find it: the built-in pack sits under
+/// `assets/texture-packs/default`, which is the folder people otherwise pick, and
+/// nothing there is ever scanned.
+pub const USER_PACK_ROOT: &str = "texture-packs";
+
 fn block_path(root: &Path, block: BlockKind, face: Face, variant: usize) -> PathBuf {
     root.join(format!(
         "blocks/{}/{}_{}.png",
