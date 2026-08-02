@@ -207,6 +207,18 @@ struct BlockState {
   and gameplay HUDs stay in the parent UI composition module. The texture-pack
   picker is a child module because preview staging and restoration have their
   own lifecycle and failure rules.
+- Appearance is centralised in `bevy::ui::theme`: palette, font sizes, control
+  metrics, and the bevel and shadow helpers. Spawn sites hold no colours or
+  literal sizes of their own, so a restyle is an edit to one module. The palette
+  is taken from the texture generator's own block colours rather than chosen for
+  the UI, which is what keeps the chrome in the same world as the art.
+- `bevy::ui::list` owns the scrollable single-selection list shared by the
+  texture-pack picker and world selection. The behaviour — selection, mutual
+  exclusion, keyboard navigation, accessibility roles — is Bevy's headless
+  `bevy_ui_widgets` (`ListBox`, `ScrollArea`, `Scrollbar`); only the look is
+  local. Rows report a `RowSelected` message keyed by an application id, so the
+  widget stays ignorant of packs and worlds, and each screen gates its reader on
+  its own state because both raise that same message.
 - Pack switching is allowed only from Settings > Texture Packs. Selecting a
   candidate fully resolves and validates it in memory, then stages its atlas,
   environment, and player palette on the live menu scene. Apply atomically

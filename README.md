@@ -132,9 +132,17 @@ player; backwall blocks never collide with the player.
   and bounded depth haze.
 - A state-driven Main Menu > Settings > Texture Packs flow, world selection,
   loading/saving overlays, HUD, and pause controls. Front-end screens share a
-  live fixed voxel showcase, use translucent left-side panels, and show the
+  live fixed voxel showcase, sit on bevelled left-side panels, and show the
   game version in the lower-right corner. Button actions are triggered only by
   Bevy's `Interaction::Pressed` state.
+- Menus are drawn in the palette of the world itself — dirt and wood browns with
+  the player's terracotta as the accent, all taken from the texture generator's
+  own colours — and rendered without antialiasing, glyphs included, so the
+  chrome stays pixel-crisp beside the voxels.
+- Anything offering a set of things to choose from — texture packs, saved worlds
+  — uses one scrollable select list: a single selection, a scrollbar down the
+  right, mouse-wheel and arrow-key navigation, and rows that cannot overflow
+  however long the names get.
 - Autosave after changed world data, save on pause, and save-aware window
   closing.
 

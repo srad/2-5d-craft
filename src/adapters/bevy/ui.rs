@@ -10,11 +10,12 @@ use crate::{
         rendering::RenderCatalog,
         session::SessionCommand,
     },
-    application::WorldId,
     domain::{BlockState, VoxelLayer},
 };
 
+mod list;
 mod menus;
+mod theme;
 
 #[derive(Component)]
 struct LoadingRoot;
@@ -35,10 +36,7 @@ pub(super) enum UiAction {
     ShowMainMenu,
     ShowSettings,
     ShowTexturePacks,
-    SelectTexturePack(String),
-    TexturePackPage(i32),
     ApplyTexturePack,
-    LoadWorld(WorldId),
     Resume,
     SaveAndQuit,
     RetrySave,
@@ -51,7 +49,6 @@ impl UiAction {
         match self {
             UiAction::NewWorld => Some(SessionCommand::NewWorld),
             UiAction::ShowWorlds => Some(SessionCommand::ShowWorlds),
-            UiAction::LoadWorld(id) => Some(SessionCommand::LoadWorld(id.clone())),
             UiAction::Resume => Some(SessionCommand::Resume),
             UiAction::SaveAndQuit => Some(SessionCommand::SaveAndQuit),
             UiAction::RetrySave => Some(SessionCommand::RetrySave),
@@ -60,8 +57,6 @@ impl UiAction {
             UiAction::ShowMainMenu
             | UiAction::ShowSettings
             | UiAction::ShowTexturePacks
-            | UiAction::SelectTexturePack(_)
-            | UiAction::TexturePackPage(_)
             | UiAction::ApplyTexturePack => None,
         }
     }
@@ -102,7 +97,8 @@ pub struct GameUiPlugin;
 
 impl Plugin for GameUiPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<UiStatus>()
+        app.add_message::<list::RowSelected>()
+            .init_resource::<UiStatus>()
             // Acceptance runs need the overlay without a keypress, so a screenshot can be
             // compared against the session log.
             .insert_resource(SimulationDebugVisible(environment_flag(
@@ -149,30 +145,29 @@ fn spawn_pause_menu(mut commands: Commands, ui_font: Res<UiFont>) {
     let font = ui_font.0.clone();
     commands
         .spawn((
-            root_node(Color::srgba(0.015, 0.020, 0.030, 0.82)),
+            root_node(theme::SCRIM),
             PauseRoot,
             DespawnOnExit(AppState::Paused),
         ))
         .with_children(|root| {
-            root.spawn((
-                Text::new("PAUSED"),
-                TextFont {
-                    font: font.clone(),
-                    font_size: FontSize::Px(62.0),
-                    ..default()
-                },
-                TextColor(Color::WHITE),
-            ));
-            spawn_button(root, &font, "RESUME", UiAction::Resume);
-            spawn_button(root, &font, "SAVE & QUIT", UiAction::SaveAndQuit);
-            spawn_button(root, &font, "RETRY SAVE", UiAction::RetrySave);
-            spawn_button(
-                root,
-                &font,
-                "QUIT WITHOUT SAVING",
-                UiAction::QuitWithoutSaving,
-            );
-            spawn_status(root, &font);
+            // The pause menu used to hang its buttons straight on the dimmed
+            // world, which left it the one screen without a panel behind it.
+            root.spawn(menu_panel_node(360.0)).with_children(|panel| {
+                panel.spawn((
+                    Text::new("PAUSED"),
+                    theme::label(&font, 36.0, theme::ACCENT),
+                ));
+                spawn_button(panel, &font, "RESUME", UiAction::Resume);
+                spawn_button(panel, &font, "SAVE & QUIT", UiAction::SaveAndQuit);
+                spawn_button(panel, &font, "RETRY SAVE", UiAction::RetrySave);
+                spawn_button(
+                    panel,
+                    &font,
+                    "QUIT WITHOUT SAVING",
+                    UiAction::QuitWithoutSaving,
+                );
+                spawn_status(panel, &font);
+            });
         });
 }
 
@@ -185,14 +180,9 @@ fn spawn_loading_screen(mut commands: Commands, ui_font: Res<UiFont>) {
             DespawnOnExit(AppState::LoadingWorld),
         ))
         .with_children(|root| {
-            root.spawn(menu_panel_node(420.0)).with_child((
+            root.spawn(menu_panel_node(360.0)).with_child((
                 Text::new("GENERATING WORLD..."),
-                TextFont {
-                    font: font.clone(),
-                    font_size: FontSize::Px(42.0),
-                    ..default()
-                },
-                TextColor(Color::WHITE),
+                theme::label(&font, theme::TEXT_XL, theme::TEXT),
             ));
             spawn_version(root, &font);
         });
@@ -207,14 +197,9 @@ fn spawn_saving_screen(mut commands: Commands, ui_font: Res<UiFont>) {
             DespawnOnExit(AppState::Saving),
         ))
         .with_children(|root| {
-            root.spawn(menu_panel_node(420.0)).with_child((
+            root.spawn(menu_panel_node(360.0)).with_child((
                 Text::new("SAVING WORLD..."),
-                TextFont {
-                    font: font.clone(),
-                    font_size: FontSize::Px(42.0),
-                    ..default()
-                },
-                TextColor(Color::WHITE),
+                theme::label(&font, theme::TEXT_XL, theme::TEXT),
             ));
             spawn_version(root, &font);
         });
@@ -251,22 +236,14 @@ fn spawn_hud(
             .with_children(|column| {
                 column.spawn((
                     Text::new(active_layer_label(active_layer.0)),
-                    TextFont {
-                        font: font.clone(),
-                        font_size: FontSize::Px(20.0),
-                        ..default()
-                    },
-                    TextColor(Color::WHITE),
+                    // The HUD keeps its own sizes and white text: it reads
+                    // against the world, not against a panel.
+                    theme::label(&font, 20.0, Color::WHITE),
                     ActiveLayerText,
                 ));
                 column.spawn((
                     Text::new("Dirt"),
-                    TextFont {
-                        font: font.clone(),
-                        font_size: FontSize::Px(24.0),
-                        ..default()
-                    },
-                    TextColor(Color::WHITE),
+                    theme::label(&font, 24.0, Color::WHITE),
                     SelectedItemText,
                 ));
                 column
@@ -307,12 +284,7 @@ fn spawn_hud(
                                 ));
                                 slot_node.spawn((
                                     Text::new(slot.to_string()),
-                                    TextFont {
-                                        font: font.clone(),
-                                        font_size: FontSize::Px(16.0),
-                                        ..default()
-                                    },
-                                    TextColor(Color::WHITE),
+                                    theme::label(&font, 16.0, Color::WHITE),
                                     Node {
                                         position_type: PositionType::Absolute,
                                         right: px(2),
@@ -347,12 +319,7 @@ fn spawn_debug_overlay(commands: &mut Commands, font: &FontSource, visible: bool
         .with_children(|column| {
             column.spawn((
                 Text::new(String::new()),
-                TextFont {
-                    font: font.clone(),
-                    font_size: FontSize::Px(24.0),
-                    ..default()
-                },
-                TextColor(Color::srgb(0.86, 0.91, 0.95)),
+                theme::label(font, 24.0, Color::srgb(0.86, 0.91, 0.95)),
                 if visible {
                     Visibility::Inherited
                 } else {
@@ -393,20 +360,33 @@ pub(super) fn front_end_root_node() -> (Node, BackgroundColor) {
     )
 }
 
-pub(super) fn menu_panel_node(width: f32) -> (Node, BackgroundColor, BorderColor) {
+pub(super) fn menu_panel_node(width: f32) -> (Node, BackgroundColor, BorderColor, BoxShadow) {
     (
         Node {
             width: px(width),
             flex_direction: FlexDirection::Column,
             align_items: AlignItems::Center,
-            row_gap: px(10),
-            padding: UiRect::all(px(24)),
-            border: UiRect::all(px(2)),
+            row_gap: px(theme::PANEL_GAP),
+            padding: UiRect::all(px(theme::PANEL_PAD)),
+            border: UiRect::all(px(theme::BEVEL)),
             ..default()
         },
-        BackgroundColor(Color::srgba(0.025, 0.045, 0.055, 0.88)),
-        BorderColor::all(Color::srgba(0.42, 0.54, 0.48, 0.82)),
+        BackgroundColor(theme::PANEL),
+        theme::bevel_raised(),
+        theme::pixel_shadow(),
     )
+}
+
+/// A horizontal strip for the actions that close a screen, so `APPLY` and `BACK`
+/// sit side by side instead of stacked full width.
+pub(super) fn button_row_node() -> Node {
+    Node {
+        flex_direction: FlexDirection::Row,
+        justify_content: JustifyContent::Center,
+        column_gap: px(12),
+        margin: UiRect::top(px(6)),
+        ..default()
+    }
 }
 
 pub(super) fn spawn_button(
@@ -419,25 +399,24 @@ pub(super) fn spawn_button(
         .spawn((
             Button,
             Node {
-                width: px(300),
-                height: px(56),
-                border: UiRect::all(px(2)),
+                width: px(theme::BUTTON_W),
+                height: px(theme::BUTTON_H),
+                border: UiRect::all(px(theme::BEVEL)),
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 ..default()
             },
             BackgroundColor(button_color(Interaction::None)),
-            BorderColor::all(Color::srgb(0.40, 0.48, 0.52)),
+            theme::bevel_raised(),
             action,
         ))
+        // Not TEXT_XL: the longest label in the game is the pause menu's
+        // "QUIT WITHOUT SAVING", nineteen characters. VT323 is monospace at about
+        // half its size per character, so at 24px that wants ~228px and would
+        // wrap out of a 216px button — the very defect this work began with.
         .with_child((
             Text::new(label),
-            TextFont {
-                font: font.clone(),
-                font_size: FontSize::Px(31.0),
-                ..default()
-            },
-            TextColor(Color::WHITE),
+            theme::label(font, theme::TEXT_LG, theme::TEXT),
         ));
 }
 
@@ -451,37 +430,27 @@ pub(super) fn spawn_compact_button(
         .spawn((
             Button,
             Node {
-                width: px(440),
-                height: px(38),
-                border: UiRect::all(px(2)),
+                width: px(theme::COMPACT_W),
+                height: px(theme::COMPACT_H),
+                border: UiRect::all(px(theme::BEVEL)),
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 ..default()
             },
             BackgroundColor(button_color(Interaction::None)),
-            BorderColor::all(Color::srgb(0.40, 0.48, 0.52)),
+            theme::bevel_raised(),
             action,
         ))
         .with_child((
             Text::new(label),
-            TextFont {
-                font: font.clone(),
-                font_size: FontSize::Px(22.0),
-                ..default()
-            },
-            TextColor(Color::WHITE),
+            theme::label(font, theme::TEXT_LG, theme::TEXT),
         ));
 }
 
 pub(super) fn spawn_status(parent: &mut ChildSpawnerCommands, font: &FontSource) {
     parent.spawn((
         Text::new(""),
-        TextFont {
-            font: font.clone(),
-            font_size: FontSize::Px(24.0),
-            ..default()
-        },
-        TextColor(Color::srgb(1.0, 0.66, 0.36)),
+        theme::label(font, theme::TEXT_MD, theme::TEXT_WARN),
         StatusText,
     ));
 }
@@ -489,12 +458,7 @@ pub(super) fn spawn_status(parent: &mut ChildSpawnerCommands, font: &FontSource)
 pub(super) fn spawn_version(parent: &mut ChildSpawnerCommands, font: &FontSource) {
     parent.spawn((
         Text::new(format!("SIDECRAFT v{}", env!("CARGO_PKG_VERSION"))),
-        TextFont {
-            font: font.clone(),
-            font_size: FontSize::Px(20.0),
-            ..default()
-        },
-        TextColor(Color::srgba(0.86, 0.90, 0.84, 0.88)),
+        theme::label(font, theme::TEXT_SM, theme::TEXT_DIM),
         Node {
             position_type: PositionType::Absolute,
             right: px(18),
@@ -526,9 +490,9 @@ fn style_buttons(mut buttons: ChangedButtonQuery) {
 
 fn button_color(interaction: Interaction) -> Color {
     match interaction {
-        Interaction::Pressed => Color::srgb(0.23, 0.46, 0.50),
-        Interaction::Hovered => Color::srgb(0.16, 0.31, 0.35),
-        Interaction::None => Color::srgb(0.09, 0.16, 0.19),
+        Interaction::Pressed => theme::PRESSED,
+        Interaction::Hovered => theme::HOVER,
+        Interaction::None => theme::RAISED,
     }
 }
 
@@ -645,11 +609,6 @@ mod tests {
     #[test]
     fn texture_pack_actions_stay_out_of_the_world_session() {
         assert!(UiAction::ShowTexturePacks.session_command().is_none());
-        assert!(
-            UiAction::SelectTexturePack("default".into())
-                .session_command()
-                .is_none()
-        );
         assert!(UiAction::ApplyTexturePack.session_command().is_none());
         assert!(UiAction::ShowSettings.session_command().is_none());
     }

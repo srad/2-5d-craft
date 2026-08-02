@@ -1,8 +1,9 @@
 use bevy::prelude::*;
 
 use super::{
-    UiAction, UiFont, front_end_root_node, menu_panel_node, spawn_button, spawn_status,
-    spawn_version,
+    UiAction, UiFont, front_end_root_node,
+    list::{ListRow, RowSelected, ellipsize, spawn_select_list},
+    menu_panel_node, spawn_button, spawn_status, spawn_version, theme,
 };
 use crate::{
     AppState,
@@ -10,6 +11,10 @@ use crate::{
 };
 
 mod texture_packs;
+
+/// Worlds visible before the list scrolls, and how much of a name fits on a row.
+const VISIBLE_WORLDS: usize = 6;
+const WORLD_NAME_LIMIT: usize = 34;
 
 #[derive(Component)]
 struct MainMenuRoot;
@@ -28,7 +33,13 @@ pub(super) fn register(app: &mut App) {
         )
         .add_systems(OnEnter(AppState::Settings), spawn_settings)
         .add_systems(OnEnter(AppState::WorldSelect), spawn_world_select)
-        .add_systems(Update, handle_navigation);
+        .add_systems(
+            Update,
+            (
+                handle_navigation,
+                load_selected_world.run_if(in_state(AppState::WorldSelect)),
+            ),
+        );
     texture_packs::register(app);
 }
 
@@ -44,16 +55,11 @@ fn spawn_main_menu(mut commands: Commands, ui_font: Res<UiFont>) {
             DespawnOnExit(AppState::MainMenu),
         ))
         .with_children(|root| {
-            root.spawn(menu_panel_node(420.0)).with_children(|panel| {
-                spawn_title(panel, &font, "SIDECRAFT", 72.0);
+            root.spawn(menu_panel_node(360.0)).with_children(|panel| {
+                spawn_title(panel, &font, "SIDECRAFT", 48.0);
                 panel.spawn((
                     Text::new("A pixel 2.5D sandbox"),
-                    TextFont {
-                        font: font.clone(),
-                        font_size: FontSize::Px(27.0),
-                        ..default()
-                    },
-                    TextColor(Color::srgb(0.62, 0.78, 0.72)),
+                    theme::label(&font, theme::TEXT_MD, theme::TEXT_DIM),
                 ));
                 spawn_button(panel, &font, "NEW WORLD", UiAction::NewWorld);
                 spawn_button(panel, &font, "LOAD WORLD", UiAction::ShowWorlds);
@@ -80,8 +86,8 @@ fn spawn_settings(mut commands: Commands, ui_font: Res<UiFont>) {
             DespawnOnExit(AppState::Settings),
         ))
         .with_children(|root| {
-            root.spawn(menu_panel_node(420.0)).with_children(|panel| {
-                spawn_title(panel, &font, "SETTINGS", 52.0);
+            root.spawn(menu_panel_node(360.0)).with_children(|panel| {
+                spawn_title(panel, &font, "SETTINGS", 36.0);
                 spawn_button(panel, &font, "TEXTURE PACKS", UiAction::ShowTexturePacks);
                 spawn_button(panel, &font, "BACK", UiAction::ShowMainMenu);
                 spawn_status(panel, &font);
@@ -103,26 +109,25 @@ fn spawn_world_select(
             DespawnOnExit(AppState::WorldSelect),
         ))
         .with_children(|root| {
-            root.spawn(menu_panel_node(480.0)).with_children(|panel| {
-                spawn_title(panel, &font, "SELECT WORLD", 52.0);
+            root.spawn(menu_panel_node(400.0)).with_children(|panel| {
+                spawn_title(panel, &font, "SELECT WORLD", 36.0);
                 if catalog.valid.is_empty() {
                     panel.spawn((
                         Text::new("No saved worlds yet"),
-                        TextFont {
-                            font: font.clone(),
-                            font_size: FontSize::Px(27.0),
-                            ..default()
-                        },
-                        TextColor(Color::srgb(0.68, 0.74, 0.70)),
+                        theme::label(&font, theme::TEXT_LG, theme::TEXT_DIM),
                     ));
-                }
-                for world in &catalog.valid {
-                    spawn_button(
-                        panel,
-                        &font,
-                        &world.name,
-                        UiAction::LoadWorld(world.id.clone()),
-                    );
+                } else {
+                    let rows: Vec<ListRow> = catalog
+                        .valid
+                        .iter()
+                        .map(|world| ListRow {
+                            key: world.id.as_str().to_owned(),
+                            title: ellipsize(&world.name, WORLD_NAME_LIMIT),
+                            detail: String::new(),
+                            selected: false,
+                        })
+                        .collect();
+                    spawn_select_list(panel, &font, &rows, VISIBLE_WORLDS);
                 }
                 spawn_button(panel, &font, "BACK", UiAction::ShowMainMenu);
                 spawn_status(panel, &font);
@@ -131,16 +136,33 @@ fn spawn_world_select(
         });
 }
 
+/// Loads the world a list row names.
+///
+/// This screen keeps its one-click behaviour — choosing a row loads it, there is
+/// no separate confirm step — so the list is adopted for scrolling and keyboard
+/// navigation rather than to stage a selection. Gated on the state because the
+/// list widget is shared with TEXTURE PACKS, which raises the same message.
+fn load_selected_world(
+    mut selections: MessageReader<RowSelected>,
+    catalog: Res<WorldCatalogResource>,
+    mut session: MessageWriter<SessionCommand>,
+) {
+    for selection in selections.read() {
+        // Look the id up rather than rebuilding a `WorldId` from the row key:
+        // construction is validated and fallible, and the catalog already holds
+        // the authoritative value.
+        if let Some(world) = catalog
+            .valid
+            .iter()
+            .find(|world| world.id.as_str() == selection.key)
+        {
+            session.write(SessionCommand::LoadWorld(world.id.clone()));
+        }
+    }
+}
+
 fn spawn_title(parent: &mut ChildSpawnerCommands, font: &FontSource, title: &str, size: f32) {
-    parent.spawn((
-        Text::new(title),
-        TextFont {
-            font: font.clone(),
-            font_size: FontSize::Px(size),
-            ..default()
-        },
-        TextColor(Color::srgb(0.92, 0.96, 0.88)),
-    ));
+    parent.spawn((Text::new(title), theme::label(font, size, theme::ACCENT)));
 }
 
 fn handle_navigation(

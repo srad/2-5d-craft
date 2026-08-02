@@ -9,6 +9,7 @@ use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::ui::IsDefaultUiCamera;
+use bevy::ui_render::UiAntiAlias;
 
 pub(crate) const GAME_CAMERA_SCALE: f32 = 1.0 / 32.0;
 const CAMERA_DECAY: f32 = 8.0;
@@ -110,7 +111,12 @@ fn setup_scene(mut commands: Commands) {
         Hdr,
         Tonemapping::TonyMcMapface,
         Bloom::NATURAL,
+        // Msaa stays on: it is the voxel world's antialiasing. `UiAntiAlias` is
+        // the UI-only control, and switching it off is half of Bevy's recipe for
+        // a pixel-art look — the other half, `FontSmoothing::None`, lives in the
+        // UI theme. Without this, every bevel and border renders soft-edged.
         Msaa::Sample4,
+        UiAntiAlias::Off,
         IsDefaultUiCamera,
         GameCamera,
     ));

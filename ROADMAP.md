@@ -100,7 +100,15 @@ from code inspection alone.
 ## M0 — Playable foundation `[x]`
 
 - `[x]` State-driven main/settings/texture-pack menus, world selection,
-  loading, gameplay HUD, pause, and saving.
+  loading, gameplay HUD, pause, and saving. Revisited after the pack picker
+  proved unusable in practice: one fixed-size button per entry meant a generated
+  pack name overflowed its button, and there was no way to scroll. Both list
+  screens now share one scrollable single-selection list built on Bevy's
+  headless `bevy_ui_widgets`, which brings arrow-key navigation and accessibility
+  roles with it — partial credit against the open UI accessibility item below.
+  The look was rebuilt at the same time around the texture generator's own
+  palette, with antialiasing off for text and UI alike; the first attempt at it
+  was invented rather than derived and read as generic.
 - `[x]` Side-on player movement and interaction locked to the foreground.
 - `[x]` Six correlated voxel depth slices rendered through Bevy's 3D stack.
 - `[x]` Deterministic terrain with caves, ores, vegetation, and bedrock.
